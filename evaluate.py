@@ -32,24 +32,25 @@ class DataCache:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
     
-    def _get_cache_key(self, h5_files, n_jets, feature_dict, max_sequence_len):
+    def _get_cache_key(self, h5_files, n_jets, feature_dict, max_sequence_len, model_type="single"):
         """Generate unique cache key based on data configuration."""
         # Create a string representation of the configuration
-        config_str = f"{h5_files}_{n_jets}_{feature_dict}_{max_sequence_len}"
+        config_str = f"{h5_files}_{n_jets}_{feature_dict}_{max_sequence_len}_{model_type}"
         # Hash it to get a short, unique filename
         hash_obj = hashlib.md5(config_str.encode())
         return hash_obj.hexdigest()
     
-    def get_cache_path(self, h5_files, n_jets, feature_dict, max_sequence_len):
+    def get_cache_path(self, h5_files, n_jets, feature_dict, max_sequence_len, model_type="single"):
         """Generate cache filename."""
-        cache_key = self._get_cache_key(h5_files, n_jets, feature_dict, max_sequence_len)
+        cache_key = self._get_cache_key(h5_files, n_jets, feature_dict, max_sequence_len, model_type)
         file_str = "_".join([Path(f).stem for f in h5_files])
         n_jets_str = "_".join(map(str, n_jets))
-        return self.cache_dir / f"data_{file_str}_{n_jets_str}_{cache_key}.pkl"
+        type_str = "dijet" if model_type == "dijet" else "single"
+        return self.cache_dir / f"data_{type_str}_{file_str}_{n_jets_str}_{cache_key}.pkl"
     
-    def load(self, h5_files, n_jets, feature_dict, max_sequence_len):
+    def load(self, h5_files, n_jets, feature_dict, max_sequence_len, model_type="single"):
         """Load dataset from cache if available."""
-        cache_path = self.get_cache_path(h5_files, n_jets, feature_dict, max_sequence_len)
+        cache_path = self.get_cache_path(h5_files, n_jets, feature_dict, max_sequence_len, model_type)
         if cache_path.exists():
             print(f"Loading cached data from {cache_path}")
             try:
@@ -62,9 +63,9 @@ class DataCache:
                 return None
         return None
     
-    def save(self, data_dict, h5_files, n_jets, feature_dict, max_sequence_len):
+    def save(self, data_dict, h5_files, n_jets, feature_dict, max_sequence_len, model_type="single"):
         """Save dataset to cache."""
-        cache_path = self.get_cache_path(h5_files, n_jets, feature_dict, max_sequence_len)
+        cache_path = self.get_cache_path(h5_files, n_jets, feature_dict, max_sequence_len, model_type)
         print(f"Saving data to cache: {cache_path}")
         try:
             with open(cache_path, 'wb') as f:
@@ -77,21 +78,27 @@ class DataCache:
             print(f"Warning: Failed to save cache ({e})")
 
 
-def extract_data_from_loader(dataloader):
+def extract_data_from_loader(dataloader, model_type="single"):
     """Extract all data from a DataLoader into tensors for caching.
     
     Parameters
     ----------
     dataloader : DataLoader
         DataLoader to extract data from
+    model_type : str
+        Type of model: "single", "dijet", or "aachen"
         
     Returns
     -------
     dict
-        Dictionary with 'features', 'masks', 'labels' tensors
+        Dictionary with tensors for features, masks, labels
+        For dijet: includes 'features', 'features_jet2', 'masks', 'masks_jet2', 'labels'
+        For single: includes 'features', 'masks', 'labels'
     """
     all_features = []
+    all_features_jet2 = []
     all_masks = []
+    all_masks_jet2 = []
     all_labels = []
     
     print("Extracting data from DataLoader...")
@@ -100,53 +107,101 @@ def extract_data_from_loader(dataloader):
         all_masks.append(batch["part_mask"])
         all_labels.append(batch["jet_type_labels"])
         
+        # For dijet models, also extract jet2 data
+        if model_type == "dijet" and "part_features_jet2" in batch:
+            all_features_jet2.append(batch["part_features_jet2"])
+            all_masks_jet2.append(batch["part_mask_jet2"])
+        
         if (batch_idx + 1) % 50 == 0:
             print(f"  Extracted {batch_idx + 1}/{len(dataloader)} batches")
     
-    return {
+    result = {
         "features": torch.cat(all_features, dim=0),
         "masks": torch.cat(all_masks, dim=0),
         "labels": torch.cat(all_labels, dim=0),
     }
+    
+    # Add jet2 data for dijet models
+    if model_type == "dijet" and all_features_jet2:
+        result["features_jet2"] = torch.cat(all_features_jet2, dim=0)
+        result["masks_jet2"] = torch.cat(all_masks_jet2, dim=0)
+    
+    return result
 
 
-def create_loader_from_cached_data(cached_data, batch_size):
+def create_loader_from_cached_data(cached_data, batch_size, model_type="single"):
     """Create a DataLoader from cached tensor data.
     
     Parameters
     ----------
     cached_data : dict
-        Dictionary with 'features', 'masks', 'labels' tensors
+        Dictionary with cached tensors
+        For single: 'features', 'masks', 'labels'
+        For dijet: 'features', 'features_jet2', 'masks', 'masks_jet2', 'labels'
     batch_size : int
         Batch size for DataLoader
+    model_type : str
+        Type of model: "single", "dijet", or "aachen"
         
     Returns
     -------
     DataLoader
         DataLoader wrapping the cached data
     """
-    class CachedDataset(torch.utils.data.Dataset):
-        def __init__(self, features, masks, labels):
-            self.features = features
-            self.masks = masks
-            self.labels = labels
+    if model_type == "dijet":
+        # Dijet dataset with both jets
+        class DijetCachedDataset(torch.utils.data.Dataset):
+            def __init__(self, features, features_jet2, masks, masks_jet2, labels):
+                self.features = features
+                self.features_jet2 = features_jet2
+                self.masks = masks
+                self.masks_jet2 = masks_jet2
+                self.labels = labels
+            
+            def __len__(self):
+                return len(self.labels)
+            
+            def __getitem__(self, idx):
+                return {
+                    "part_features": self.features[idx],
+                    "part_features_jet2": self.features_jet2[idx],
+                    "part_mask": self.masks[idx],
+                    "part_mask_jet2": self.masks_jet2[idx],
+                    "jet_type_labels": self.labels[idx],
+                    "jet_features": torch.tensor([]),
+                }
         
-        def __len__(self):
-            return len(self.labels)
+        dataset = DijetCachedDataset(
+            cached_data["features"],
+            cached_data["features_jet2"],
+            cached_data["masks"],
+            cached_data["masks_jet2"],
+            cached_data["labels"]
+        )
+    else:
+        # Single-jet dataset
+        class CachedDataset(torch.utils.data.Dataset):
+            def __init__(self, features, masks, labels):
+                self.features = features
+                self.masks = masks
+                self.labels = labels
+            
+            def __len__(self):
+                return len(self.labels)
+            
+            def __getitem__(self, idx):
+                return {
+                    "part_features": self.features[idx],
+                    "part_mask": self.masks[idx],
+                    "jet_type_labels": self.labels[idx],
+                    "jet_features": torch.tensor([]),
+                }
         
-        def __getitem__(self, idx):
-            return {
-                "part_features": self.features[idx],
-                "part_mask": self.masks[idx],
-                "jet_type_labels": self.labels[idx],
-                "jet_features": torch.tensor([]),
-            }
-    
-    dataset = CachedDataset(
-        cached_data["features"],
-        cached_data["masks"],
-        cached_data["labels"]
-    )
+        dataset = CachedDataset(
+            cached_data["features"],
+            cached_data["masks"],
+            cached_data["labels"]
+        )
     
     return DataLoader(
         dataset,
@@ -614,12 +669,26 @@ def main():
         jet_name = "jet1"
         print("Loading single jet for evaluation...")
     
-    # Initialize cache (only for single-jet models)
+    # Initialize cache
     cache = DataCache(cache_dir=".cache/evaluation")
     
-    # For dijet models, use create_lhco_h5_test_loader directly (now supports jet_name='both')
-    if args.model_type == "dijet":
-        print("Loading dijet test data from HDF5...")
+    # Try to load from cache (works for both single-jet and dijet models now)
+    print("Checking for cached data...")
+    cached_data = cache.load(
+        h5_files=h5_files_test,
+        n_jets=args.n_jets_test,
+        feature_dict=input_features_dict,
+        max_sequence_len=128,
+        model_type=args.model_type
+    )
+    
+    if cached_data is not None:
+        # Create DataLoader from cached data
+        print("Creating DataLoader from cached data...")
+        test_loader = create_loader_from_cached_data(cached_data, args.batch_size, args.model_type)
+    else:
+        # Load from HDF5 files
+        print(f"Loading test data from HDF5 files (jet_name={jet_name})...")
         test_loader = create_lhco_h5_test_loader(
             h5_files_test=h5_files_test,
             feature_dict=input_features_dict,
@@ -631,48 +700,21 @@ def main():
             shuffle_test=False,
             num_workers=1,
         )
-    else:
-        # Try to load from cache for single-jet models
-        print("Checking for cached data...")
-        cached_data = cache.load(
+        
+        # Extract and cache the data for future runs
+        print("Caching loaded data for future evaluations...")
+        cached_data = extract_data_from_loader(test_loader, model_type=args.model_type)
+        cache.save(
+            data_dict=cached_data,
             h5_files=h5_files_test,
             n_jets=args.n_jets_test,
             feature_dict=input_features_dict,
-            max_sequence_len=128
+            max_sequence_len=128,
+            model_type=args.model_type
         )
         
-        if cached_data is not None:
-            # Create DataLoader from cached data
-            print("Creating DataLoader from cached data...")
-            test_loader = create_loader_from_cached_data(cached_data, args.batch_size)
-        else:
-            # Load from HDF5 files
-            print("Loading test data from HDF5 files...")
-            test_loader = create_lhco_h5_test_loader(
-                h5_files_test=h5_files_test,
-                feature_dict=input_features_dict,
-                batch_size=args.batch_size,
-                n_jets_test=args.n_jets_test,
-                max_sequence_len=128,
-                mom4_format="epxpypz",
-                jet_name=jet_name,
-                shuffle_test=False,  # Don't shuffle for reproducibility
-                num_workers=1,
-            )
-            
-            # Extract and cache the data for future runs
-            print("Caching loaded data for future evaluations...")
-            cached_data = extract_data_from_loader(test_loader)
-            cache.save(
-                data_dict=cached_data,
-                h5_files=h5_files_test,
-                n_jets=args.n_jets_test,
-                feature_dict=input_features_dict,
-                max_sequence_len=128
-            )
-            
-            # Recreate loader from cached data to ensure consistent behavior
-            test_loader = create_loader_from_cached_data(cached_data, args.batch_size)
+        # Recreate loader from cached data to ensure consistent behavior
+        test_loader = create_loader_from_cached_data(cached_data, args.batch_size, args.model_type)
     
     # Initialize evaluator and run evaluation
     evaluator = ModelEvaluator(

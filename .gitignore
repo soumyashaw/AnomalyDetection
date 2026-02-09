@@ -30,7 +30,6 @@ Desktop.ini
 # =========================
 # Logs & temp files
 # =========================
-*.log
 *.tmp
 *.temp
 *.swp

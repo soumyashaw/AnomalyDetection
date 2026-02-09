@@ -1,0 +1,3 @@
+[ ] Evaluate all attention trained models
+[ ] Train models for aachen classification head
+[ ] 

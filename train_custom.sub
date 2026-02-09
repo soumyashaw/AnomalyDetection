@@ -1,0 +1,13 @@
+# Request resources
+request_gpus   = 1
+request_cpus   = 1
+request_memory = 16GB
+
+# Files
+executable = train_custom.sh
+output     = batchSubmissions/$(Cluster)_$(Process).out
+error      = batchSubmissions/$(Cluster)_$(Process).err
+log        = batchSubmissions/$(Cluster).log
+
+# Queue job
+queue

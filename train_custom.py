@@ -32,9 +32,10 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, TensorDataset
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, Callback
 from sklearn.metrics import roc_auc_score
-from lightning.pytorch.loggers import TensorBoardLogger
+from lightning.pytorch.loggers import WandbLogger
 from datetime import datetime
 from pathlib import Path
+import wandb
 
 # gabbro imports
 from gabbro.utils.arrays import ak_pad
@@ -117,11 +118,6 @@ class ExperimentLogger:
     def get_checkpoint_dir(self):
         """Get checkpoint directory for this run."""
         return str(self.run_dir / "checkpoints")
-    
-    def get_tensorboard_dir(self):
-        """Get tensorboard log directory for this run."""
-        return str(self.run_dir / "tensorboard")
-
 
 
 def create_model_config(pp_dict, args):
@@ -379,6 +375,13 @@ def main():
     parser.add_argument("--pretrained_ckpt", type=str, default="checkpoints/hamburg/2025-08-10_10-03-50_NonrandomSubstance570_0_epoch_299_step_300000_loss_3.11938.ckpt", help="Path to pre-trained checkpoint")
     parser.add_argument("--load_pretrained", action="store_true", help="Load pre-trained backbone weights from checkpoint")
     parser.add_argument("--use_class_weights", type=lambda x: x.lower() == 'true', default=True, help="Use automatic class weighting for imbalanced data (default: True)")
+    
+    # W&B arguments
+    parser.add_argument("--use_wandb", action="store_true", help="Enable Weights & Biases logging")
+    parser.add_argument("--wandb_project", type=str, default="anomaly-detection-lhco", help="W&B project name")
+    parser.add_argument("--wandb_entity", type=str, default=None, help="W&B entity/team name (optional)")
+    parser.add_argument("--wandb_run_name", type=str, default=None, help="W&B run name (optional, auto-generated if not provided)")
+    
     args = parser.parse_args()
 
     # ============================================================
@@ -659,12 +662,32 @@ def main():
     # AUC callback: computes ROC AUC on validation set each epoch and logs it
     auc_callback = AUCCallback()
 
-    # Setup logger
-    logger = TensorBoardLogger(
-        save_dir=exp_logger.get_tensorboard_dir(),
-        name="",
-        version="",
-    )
+    # Setup W&B logger
+    loggers = []
+    if args.use_wandb:
+        wandb_run_name = args.wandb_run_name if args.wandb_run_name else exp_logger.run_name
+        
+        wandb_logger = WandbLogger(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=wandb_run_name,
+            save_dir=str(exp_logger.run_dir),
+            config=full_config,
+            log_model=True,
+        )
+        loggers.append(wandb_logger)
+        
+        print(f"\n{'=' * 80}")
+        print(f"W&B logging enabled!")
+        print(f"  Project: {args.wandb_project}")
+        if args.wandb_entity:
+            print(f"  Entity: {args.wandb_entity}")
+        print(f"  Run name: {wandb_run_name}")
+        print(f"  Run URL: {wandb_logger.experiment.url}")
+        print(f"{'=' * 80}\n")
+    else:
+        print(f"\nW&B logging disabled. Use --use_wandb to enable.\n")
+        wandb_logger = None
 
     # Create trainer
     print("Starting training...")
@@ -672,7 +695,7 @@ def main():
         max_steps=args.max_steps,
         accelerator="auto",
         devices=1,
-        logger=logger,
+        logger=loggers if loggers else False,
         callbacks=[checkpoint_callback, auc_callback],  # early_stop_callback removed
         log_every_n_steps=20,
         gradient_clip_val=1,
@@ -698,17 +721,37 @@ def main():
         print(f"Best checkpoint: {checkpoint_callback.best_model_path}")
         print(f"Best validation loss: {checkpoint_callback.best_model_score:.4f}")
         print(f"Results saved to: {exp_logger.run_dir}")
+        if args.use_wandb:
+            print(f"W&B run: {wandb.run.url}")
+            wandb.finish()
         print("=" * 80 + "\n")
+        
+    except KeyboardInterrupt:
+        print("\n" + "=" * 80)
+        print("Training interrupted by user!")
+        print(f"Partial results saved to: {exp_logger.run_dir}")
+        print("=" * 80 + "\n")
+        
+        if args.use_wandb:
+            wandb.finish()
         
     except Exception as e:
         # Log error if training fails
         error_info = {
             "training_completed": False,
             "error": str(e),
+            "error_type": type(e).__name__,
             "timestamp_error": datetime.now().isoformat(),
         }
         exp_logger.log_results(error_info)
+        print(f"\n{'=' * 80}")
         print(f"Training failed! Error logged to: {exp_logger.run_dir}")
+        print(f"Error: {e}")
+        print("=" * 80 + "\n")
+        
+        if args.use_wandb:
+            wandb.finish(exit_code=1)
+        
         raise
 
 if __name__ == "__main__":

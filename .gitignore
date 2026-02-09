@@ -3,6 +3,10 @@
 # =========================
 batchSubmissions/
 cache/
+train.py
+train_aachen.py
+evaluate.py
+README.md
 
 # =========================
 # VS Code

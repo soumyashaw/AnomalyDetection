@@ -32,7 +32,7 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, TensorDataset
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, Callback
 from sklearn.metrics import roc_auc_score
-from lightning.pytorch.loggers import TensorBoardLogger, CSVLogger, WandbLogger
+from lightning.pytorch.loggers import WandbLogger
 from datetime import datetime
 from pathlib import Path
 import matplotlib.pyplot as plt
@@ -119,11 +119,6 @@ class ExperimentLogger:
     def get_checkpoint_dir(self):
         """Get checkpoint directory for this run."""
         return str(self.run_dir / "checkpoints")
-    
-    def get_tensorboard_dir(self):
-        """Get tensorboard log directory for this run."""
-        return str(self.run_dir / "tensorboard")
-
 
 
 def create_model_config(pp_dict, args):
@@ -560,23 +555,7 @@ def main():
     # Setup loggers
     loggers = []
     
-    # TensorBoard logger (always enabled)
-    tensorboard_logger = TensorBoardLogger(
-        save_dir=exp_logger.get_tensorboard_dir(),
-        name="",
-        version="",
-    )
-    loggers.append(tensorboard_logger)
-    
-    # CSV logger (always enabled)
-    csv_logger = CSVLogger(
-        save_dir=exp_logger.get_csv_dir(),
-        name="",
-        version="",
-    )
-    loggers.append(csv_logger)
-    
-    # W&B logger (optional)
+    # W&B logger
     if args.use_wandb:
         # Use custom run name if provided, otherwise use ExperimentLogger's run name
         wandb_run_name = args.wandb_run_name if args.wandb_run_name else exp_logger.run_name
@@ -601,6 +580,7 @@ def main():
         print(f"{'=' * 80}\n")
     else:
         print(f"\nW&B logging disabled. Use --use_wandb to enable.\n")
+        wandb_logger = None
 
     # Create trainer
     print("Starting training...")
@@ -641,8 +621,6 @@ def main():
         print(f"Best checkpoint: {checkpoint_callback.best_model_path}")
         print(f"Best validation loss: {checkpoint_callback.best_model_score:.4f}")
         print(f"Results saved to: {exp_logger.run_dir}")
-        print(f"Tensorboard logs: {exp_logger.get_tensorboard_dir()}")
-        print(f"CSV logs: {exp_logger.get_csv_dir()}")
         print(f"Training curves: {exp_logger.run_dir / 'plots' / 'training_curves.png'}")
         if args.use_wandb:
             print(f"W&B run: {wandb.run.url}")

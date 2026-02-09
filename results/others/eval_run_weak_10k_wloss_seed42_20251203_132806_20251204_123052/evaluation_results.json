@@ -1,0 +1,54 @@
+{
+    "checkpoint_path": "logs/run_weak_10k_wloss_20251203_132806/checkpoints/anomaly_detector_epoch=155_val_loss=0.6282.ckpt",
+    "evaluation_timestamp": "20251204_123052",
+    "metrics": {
+        "roc_auc": 0.9417628239499999,
+        "average_precision": 0.8660636302817691,
+        "accuracy": 0.890256,
+        "sensitivity": 0.47346,
+        "specificity": 0.994455,
+        "threshold_used": 0.5,
+        "optimal_threshold": 0.24140717089176178,
+        "confusion_matrix": [
+            [
+                198891,
+                1109
+            ],
+            [
+                26327,
+                23673
+            ]
+        ],
+        "classification_report": {
+            "Background": {
+                "precision": 0.8831043699881892,
+                "recall": 0.994455,
+                "f1-score": 0.9354778019745166,
+                "support": 200000.0
+            },
+            "Signal": {
+                "precision": 0.9552497780647244,
+                "recall": 0.47346,
+                "f1-score": 0.6331202695835896,
+                "support": 50000.0
+            },
+            "accuracy": 0.890256,
+            "macro avg": {
+                "precision": 0.9191770740264569,
+                "recall": 0.7339575,
+                "f1-score": 0.7842990357790531,
+                "support": 250000.0
+            },
+            "weighted avg": {
+                "precision": 0.8975334516034962,
+                "recall": 0.890256,
+                "f1-score": 0.8750062954963311,
+                "support": 250000.0
+            }
+        },
+        "n_samples": 250000,
+        "n_signal": 50000,
+        "n_background": 200000
+    },
+    "device": "cuda:0"
+}

@@ -1,0 +1,22 @@
+{
+    "best_model_path": "/.automount/home/home__home3/institut_thp/soshaw/AnomalyDetection/logs/run_20251222_191500/checkpoints/anomaly_detector_epoch=207_val_loss=0.6802.ckpt",
+    "best_model_score": 0.6801773309707642,
+    "current_epoch": 295,
+    "global_step": 1000000,
+    "training_completed": true,
+    "timestamp_end": "2025-12-23T04:43:52.901279",
+    "final_metrics": {
+        "train_loss": 0.6736620664596558,
+        "train_loss_step": 0.6981098055839539,
+        "train_acc": 0.6202396750450134,
+        "train_acc_step": 0.53125,
+        "val_loss": 0.6836137175559998,
+        "val_loss_epoch": 0.6836137175559998,
+        "val_acc": 0.6095914244651794,
+        "val_acc_epoch": 0.6095914244651794,
+        "val_auc": 0.5348265767097473,
+        "train_loss_epoch": 0.6736620664596558,
+        "train_acc_epoch": 0.6202396750450134,
+        "epoch_train_duration_minutes": 1.2804290056228638
+    }
+}

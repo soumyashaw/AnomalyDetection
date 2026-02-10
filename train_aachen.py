@@ -232,7 +232,7 @@ class AUCCallback(Callback):
                 labels = batch["jet_type_labels"].to(device)
                 
                 # Check if model is dijet or single-jet
-                if isinstance(pl_module, BackboneDijetClassificationLightning):
+                if isinstance(pl_module, (BackboneDijetClassificationLightning, BackboneAachenClassificationLightning)):
                     # Dijet model: needs both jets
                     X1 = batch["part_features"].to(device)
                     X2 = batch["part_features_jet2"].to(device)
@@ -245,7 +245,13 @@ class AUCCallback(Callback):
                     mask = batch["part_mask"].to(device)
                     logits = pl_module(X, mask)
                 
-                probs = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
+                # Handle different logit shapes
+                if logits.dim() == 1:
+                    # Binary classification with single logit (BCEWithLogitsLoss)
+                    probs = torch.sigmoid(logits).cpu().numpy()
+                else:
+                    # Multi-class with softmax
+                    probs = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
                 all_preds.append(probs)
                 all_labels.append(labels.cpu().numpy())
 
@@ -265,10 +271,46 @@ class AUCCallback(Callback):
         pl_module.log("val_auc", auc_val, prog_bar=True, logger=True)
 
 
+class MetricsLoggingCallback(Callback):
+    """Logs training and validation metrics to the ExperimentLogger periodically."""
+    
+    def __init__(self, exp_logger, log_every_n_steps=20):
+        super().__init__()
+        self.exp_logger = exp_logger
+        self.log_every_n_steps = log_every_n_steps
+        self.metrics_history = []
+    
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        """Log metrics after each training batch."""
+        if trainer.global_step % self.log_every_n_steps == 0:
+            # Collect current metrics
+            metrics = {
+                "global_step": trainer.global_step,
+                "epoch": trainer.current_epoch,
+            }
+            
+            # Add logged metrics from the module
+            if hasattr(trainer, 'callback_metrics'):
+                for key, value in trainer.callback_metrics.items():
+                    if torch.is_tensor(value):
+                        metrics[key] = float(value.item())
+                    else:
+                        metrics[key] = float(value) if isinstance(value, (int, float)) else value
+            
+            self.metrics_history.append(metrics)
+    
+    def on_train_end(self, trainer, pl_module):
+        """Save metrics history when training ends."""
+        if self.metrics_history:
+            metrics_file = self.exp_logger.run_dir / "metrics_history.json"
+            with open(metrics_file, 'w') as f:
+                json.dump(self.metrics_history, f, indent=2, default=str)
+
+
 def main():
     parser = argparse.ArgumentParser(description="OmniJet-alpha Anomaly Detection Training Script")
-    parser.add_argument("--dataset_path", default="/.automount/net_rw/net__data_ttk/soshaw", type=str, help="Path to the LHCO dataset")
-    parser.add_argument("--gpu_id", type=int, default=0, help="GPU ID to use for computation")
+    parser.add_argument("--dataset_path", default="/mnt/SAS_B/Soumya/LHCO/test_small", type=str, help="Path to the LHCO dataset")
+    parser.add_argument("--gpu_id", type=int, default=2, help="GPU ID to use for computation")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--jet_name", type=str, default="jet1", choices=["jet1", "jet2", "both"], help="Name of the jet to use from the dataset")
     parser.add_argument("--merge_strategy", type=str, default="concat", choices=["concat", "average", "weighted_sum", "attention"], help="Merge strategy for dijet model")

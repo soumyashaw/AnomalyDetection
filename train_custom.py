@@ -360,8 +360,8 @@ def load_pretrained_backbone(model, ckpt_path, strict=False):
 
 def main():
     parser = argparse.ArgumentParser(description="OmniJet-alpha Anomaly Detection Training Script")
-    parser.add_argument("--dataset_path", default="/.automount/net_rw/net__data_ttk/soshaw", type=str, help="Path to the LHCO dataset")
-    parser.add_argument("--gpu_id", type=int, default=0, help="GPU ID to use for computation")
+    parser.add_argument("--dataset_path", default="/mnt/SAS_B/Soumya/LHCO/test_small", type=str, help="Path to the LHCO dataset")
+    parser.add_argument("--gpu_id", type=int, default=2, help="GPU ID to use for computation")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--jet_name", type=str, default="jet1", choices=["jet1", "jet2", "both"], help="Name of the jet to use from the dataset")
     parser.add_argument("--merge_strategy", type=str, default="concat", choices=["concat", "average", "weighted_sum", "attention"], help="Merge strategy for dijet model")
@@ -371,7 +371,7 @@ def main():
     parser.add_argument("--train_val_split", type=float, default=0.7, help="Train/validation split ratio")
     parser.add_argument("--n_jets_train", type=list, default=[5000, 100000, 200000], help="Number of jets per class for training [signal, supp, background]")
     parser.add_argument("--embedding_dim", type=int, default=128, help="Embedding dimension")
-    parser.add_argument("--log_dir", type=str, default="logs", help="Directory for experiment logs")
+    parser.add_argument("--log_dir", type=str, default="dijet_expts", help="Directory for experiment logs")
     parser.add_argument("--pretrained_ckpt", type=str, default="checkpoints/hamburg/2025-08-10_10-03-50_NonrandomSubstance570_0_epoch_299_step_300000_loss_3.11938.ckpt", help="Path to pre-trained checkpoint")
     parser.add_argument("--load_pretrained", action="store_true", help="Load pre-trained backbone weights from checkpoint")
     parser.add_argument("--use_class_weights", type=lambda x: x.lower() == 'true', default=True, help="Use automatic class weighting for imbalanced data (default: True)")

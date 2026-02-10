@@ -3,6 +3,7 @@
 # =========================
 batchSubmissions/
 cache/
+.cache/
 train.py
 train_aachen.py
 evaluate.py

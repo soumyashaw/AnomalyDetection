@@ -17,7 +17,7 @@ COMPONENTS USED:
     ├── PyTorch Lightning Trainer
     └── AdamW + Scheduler
 
-Meant for training the custom anomaly detection model on LHCO datasets. (Trained on 200k bkg + 100k (bkg) + 10k, 5k, 2k, 1k, 600 signal jets) (Tested on 200k bkg + 50k signal jets)
+Meant for training the supervised anomaly detection model on LHCO datasets. (Trained on 200k bkg + 25k signal jets) (Tested on 200k bkg + 50k signal jets)
 """
 # imports
 import os
@@ -35,11 +35,12 @@ from sklearn.metrics import roc_auc_score
 from lightning.pytorch.loggers import WandbLogger
 from datetime import datetime
 from pathlib import Path
+import matplotlib.pyplot as plt
 import wandb
 
 # gabbro imports
 from gabbro.utils.arrays import ak_pad
-from gabbro.data.data_utils import create_custom_lhco_h5_dataloaders
+from gabbro.data.data_utils import create_lhco_h5_dataloaders
 from gabbro.models.backbone import BackboneClassificationLightning, BackboneDijetClassificationLightning, BackboneAachenClassificationLightning
 from gabbro.data.loading import load_lhco_jets_from_h5, load_multiple_h5_files
 
@@ -147,7 +148,7 @@ def create_model_config(pp_dict, args):
             "intermediate_dim": None,
         }),
         
-        # Transformer configuration (matching pre-trained checkpoint)
+        # Transformer configuration
         "transformer_cfg": OmegaConf.create({
             "dim": args.embedding_dim,  # Must match embedding_dim
             "n_blocks": 8,
@@ -170,19 +171,19 @@ def create_model_config(pp_dict, args):
             },
         }),
         
-        # Classification head settings (for class_attention type)
-        "class_head_hidden_dim": 128,
-        "class_head_num_heads": 8,
-        "class_head_num_CA_blocks": 2,
-        "class_head_num_SA_blocks": 0,
-        "class_head_dropout_rate": 0.1,
-
-        # Anomaly detection head settings (for Aachen method)
+        # # Classification head settings (for class_attention type omnijet alpha)
         # "class_head_hidden_dim": 128,
-        # "class_head_num_heads": 2,
+        # "class_head_num_heads": 8,
         # "class_head_num_CA_blocks": 2,
         # "class_head_num_SA_blocks": 0,
         # "class_head_dropout_rate": 0.1,
+
+        # Anomaly detection head settings (for Aachen method)
+        "class_head_hidden_dim": 128,
+        "class_head_num_heads": 2,
+        "class_head_num_CA_blocks": 2,
+        "class_head_num_SA_blocks": 0,
+        "class_head_dropout_rate": 0.1,
         
         # Jet-level features
         "jet_features_input_dim": 0,
@@ -264,104 +265,10 @@ class AUCCallback(Callback):
         pl_module.log("val_auc", auc_val, prog_bar=True, logger=True)
 
 
-def load_pretrained_backbone(model, ckpt_path, strict=False):
-    """Load pre-trained backbone weights from a checkpoint.
-    
-    This function loads backbone weights from a pre-trained checkpoint with
-    flexible handling of dimension mismatches. Layers with compatible dimensions
-    are loaded, while incompatible layers (e.g., input projection due to different
-    feature counts) are initialized randomly.
-    
-    Parameters
-    ----------
-    model : BackboneClassificationLightning
-        The model to load weights into
-    ckpt_path : str
-        Path to the checkpoint file
-    strict : bool, optional
-        Whether to strictly enforce that the keys in state_dict match (default: False)
-        When False, allows partial loading with dimension mismatches
-    """
-    print(f"Loading checkpoint from: {ckpt_path}")
-    
-    # Load checkpoint
-    device = next(model.parameters()).device
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-    
-    # Extract state dict
-    if "state_dict" in ckpt:
-        state_dict = ckpt["state_dict"]
-    else:
-        state_dict = ckpt
-    
-    # Filter to only backbone weights
-    backbone_state_dict = {}
-    for key, value in state_dict.items():
-        # Keep only backbone-related keys, skip head/classifier keys
-        if key.startswith("backbone."):
-            # Remove "backbone." prefix for loading into model.backbone
-            new_key = key.replace("backbone.", "")
-            backbone_state_dict[new_key] = value
-        elif key.startswith("module."):
-            # Handle case where weights might be saved with "module." prefix
-            new_key = key.replace("module.", "")
-            if not new_key.startswith("head"):  # Skip head weights
-                backbone_state_dict[new_key] = value
-    
-    # Remove tril keys for backwards compatibility
-    backbone_state_dict = {k: v for k, v in backbone_state_dict.items() if ".tril" not in k}
-    
-    # Get current model state dict
-    current_state_dict = model.backbone.state_dict()
-    
-    # Filter out keys with dimension mismatches
-    compatible_state_dict = {}
-    incompatible_keys = []
-    
-    for key, value in backbone_state_dict.items():
-        if key in current_state_dict:
-            if current_state_dict[key].shape == value.shape:
-                compatible_state_dict[key] = value
-            else:
-                incompatible_keys.append(
-                    f"{key}: checkpoint shape {value.shape} vs model shape {current_state_dict[key].shape}"
-                )
-        else:
-            # Key exists in checkpoint but not in current model
-            incompatible_keys.append(f"{key}: not found in current model")
-    
-    print(f"\nLoading {len(compatible_state_dict)}/{len(backbone_state_dict)} compatible backbone parameters")
-    print(f"Sample compatible keys: {list(compatible_state_dict.keys())[:5]}")
-    
-    if incompatible_keys:
-        print(f"\n⚠️  Found {len(incompatible_keys)} incompatible parameters (will be randomly initialized):")
-        for key in incompatible_keys[:10]:
-            print(f"  - {key}")
-        if len(incompatible_keys) > 10:
-            print(f"  ... and {len(incompatible_keys) - 10} more")
-    
-    # Load the compatible weights
-    missing_keys, unexpected_keys = model.backbone.load_state_dict(compatible_state_dict, strict=False)
-    
-    if missing_keys:
-        print(f"\n📝 Missing keys ({len(missing_keys)}) - these will remain randomly initialized:")
-        for key in missing_keys[:10]:
-            print(f"  - {key}")
-        if len(missing_keys) > 10:
-            print(f"  ... and {len(missing_keys) - 10} more")
-    
-    print("\n✓ Backbone weights loaded successfully!")
-    print("  - Transformer blocks: loaded from checkpoint")
-    print("  - Input/output projections: may be randomly initialized due to feature dimension differences")
-    print("  - Classification head: randomly initialized (2 classes for LHCO vs 10 classes in checkpoint)")
-
-
-
-
 def main():
     parser = argparse.ArgumentParser(description="OmniJet-alpha Anomaly Detection Training Script")
     parser.add_argument("--dataset_path", default="/.automount/net_rw/net__data_ttk/soshaw", type=str, help="Path to the LHCO dataset")
-    parser.add_argument("--gpu_id", type=int, default=2, help="GPU ID to use for computation")
+    parser.add_argument("--gpu_id", type=int, default=0, help="GPU ID to use for computation")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--jet_name", type=str, default="jet1", choices=["jet1", "jet2", "both"], help="Name of the jet to use from the dataset")
     parser.add_argument("--merge_strategy", type=str, default="concat", choices=["concat", "average", "weighted_sum", "attention"], help="Merge strategy for dijet model")
@@ -369,16 +276,14 @@ def main():
     parser.add_argument("--max_steps", type=int, default=1000000, help="Maximum number of training steps")
     parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--train_val_split", type=float, default=0.7, help="Train/validation split ratio")
-    parser.add_argument("--n_jets_train", type=list, default=[5000, 100000, 200000], help="Number of jets per class for training [signal, supp, background]")
+    parser.add_argument("--n_jets_train", type=list, default=[25000, 200000], help="Number of jets per class for training [signal, background]")
     parser.add_argument("--embedding_dim", type=int, default=128, help="Embedding dimension")
-    parser.add_argument("--log_dir", type=str, default="dijet_expts", help="Directory for experiment logs")
-    parser.add_argument("--pretrained_ckpt", type=str, default="checkpoints/hamburg/2025-08-10_10-03-50_NonrandomSubstance570_0_epoch_299_step_300000_loss_3.11938.ckpt", help="Path to pre-trained checkpoint")
-    parser.add_argument("--load_pretrained", action="store_true", help="Load pre-trained backbone weights from checkpoint")
+    parser.add_argument("--log_dir", type=str, default="aachen_head_expts", help="Directory for experiment logs")
     parser.add_argument("--use_class_weights", type=lambda x: x.lower() == 'true', default=True, help="Use automatic class weighting for imbalanced data (default: True)")
     
     # W&B arguments
     parser.add_argument("--use_wandb", action="store_true", help="Enable Weights & Biases logging")
-    parser.add_argument("--wandb_project", type=str, default="anomaly-detection-lhco", help="W&B project name")
+    parser.add_argument("--wandb_project", type=str, default="OmniJet-alpha", help="W&B project name")
     parser.add_argument("--wandb_entity", type=str, default=None, help="W&B entity/team name (optional)")
     parser.add_argument("--wandb_run_name", type=str, default=None, help="W&B run name (optional, auto-generated if not provided)")
     
@@ -411,19 +316,17 @@ def main():
     }
 
     signal_path = os.path.join(args.dataset_path, "sn_25k_SR_train.h5")
-    supp_background_path = os.path.join(args.dataset_path, "bg_100k_SR_supp.h5")
     background_path = os.path.join(args.dataset_path, "bg_200k_SR_train.h5")
     
-    h5_files_all = [signal_path, supp_background_path, background_path]
+    h5_files_all = [signal_path, background_path]
+
     print("n_jets_train:", args.n_jets_train)
     print("Using Jet:", args.jet_name)
-
 
     # Log data configuration
     data_config = {
         "dataset_path": args.dataset_path,
         "signal_file": signal_path,
-        "supp_background_file": supp_background_path,
         "background_file": background_path,
         "n_jets_train": args.n_jets_train,
         "batch_size": args.batch_size,
@@ -436,7 +339,7 @@ def main():
         "jet_name": args.jet_name,
     }
     
-    train_loader, val_loader = create_custom_lhco_h5_dataloaders(
+    train_loader, val_loader = create_lhco_h5_dataloaders(
         h5_files_train=h5_files_all,
         h5_files_val=None,
         feature_dict=input_features_dict,
@@ -458,28 +361,23 @@ def main():
     model_kwargs = create_model_config(input_features_dict, args)
     
     if args.use_class_weights:
-        # For weak supervision: Calculate weights based on ACTUAL label distribution
-        # n_jets_train = [signal_real, supp_bg_labeled_as_signal, background_real]
-        # Actual label distribution after loading:
-        #   - Label 1: signal_real + supp_bg_labeled_as_signal  
-        #   - Label 0: background_real
-        n_label_1 = args.n_jets_train[0] + args.n_jets_train[1]  # signal + supp background
-        n_label_0 = args.n_jets_train[2]  # clean background
-        total = n_label_1 + n_label_0
+        # n_jets_train = [signal, background] = [25000, 200000]
+        n_signal = args.n_jets_train[0]
+        n_background = args.n_jets_train[1]
+        total = n_signal + n_background
         
         # Weight = total / (n_classes * n_samples_per_class)
-        # Higher weight for minority class
-        weight_label_0 = total / (2.0 * n_label_0)  # Weight for class 0 (clean background)
-        weight_label_1 = total / (2.0 * n_label_1)  # Weight for class 1 (signal + polluted)
+        # Higher weight for minority class (signal)
+        # Note: In LHCO files, signal=1, background=0
+        weight_background = total / (2.0 * n_background)  # Weight for class 0
+        weight_signal = total / (2.0 * n_signal)  # Weight for class 1
         # PyTorch CrossEntropyLoss expects weights in class order: [weight_for_class_0, weight_for_class_1]
-        class_weights = [weight_label_0, weight_label_1]  # CORRECT ORDER!
+        class_weights = [weight_background, weight_signal]
         
-        print(f"\n=== Weak Supervision Label Distribution ===")
-        print(f"Label 0 (clean background): {n_label_0} jets → weight={weight_label_0:.4f}")
-        print(f"Label 1 (signal + polluted bg): {n_label_1} jets → weight={weight_label_1:.4f}")
-        print(f"  - True signal: {args.n_jets_train[0]}")
-        print(f"  - Polluted background: {args.n_jets_train[1]}")
-        print(f"Weight ratio (Label_1/Label_0): {weight_label_1/weight_label_0:.4f}")
+        print(f"\n=== Supervised Training Label Distribution ===")
+        print(f"Class 0 (Background): {n_background} jets → weight={weight_background:.4f}")
+        print(f"Class 1 (Signal): {n_signal} jets → weight={weight_signal:.4f}")
+        print(f"Weight ratio (Signal/Background): {weight_signal/weight_background:.4f}")
         print(f"Class weights array: {class_weights}\n")
         model_kwargs["class_weights"] = class_weights
     else:
@@ -489,14 +387,14 @@ def main():
     scheduler_with_params = partial(
         torch.optim.lr_scheduler.CosineAnnealingLR,
         T_max=1000000,
-        eta_min=1e-6,  # minimum learning rate
+        eta_min=1e-6, # minimum learning rate
     )
 
     # -------------------------------------------------------------------------
     # ---------------------- Single Jet Data Model ----------------------------
     # -------------------------------------------------------------------------
 
-    # Initialize the Backbone + Classification Head
+    # Initialize the Backbone + Classification Head (Single Jet)
     # model = BackboneClassificationLightning(
     #     optimizer=torch.optim.AdamW,
     #     optimizer_kwargs={
@@ -520,31 +418,7 @@ def main():
     # ------------------------- DiJet Data Model ------------------------------
     # -------------------------------------------------------------------------
 
-    model = BackboneDijetClassificationLightning(
-        optimizer=torch.optim.AdamW,
-        optimizer_kwargs={
-            "lr": 1e-3,
-            "weight_decay": 1e-2,
-            "partial": True,
-        },
-        scheduler=scheduler_with_params,
-        merge_strategy=args.merge_strategy,  # other options: "average", "weighted_sum", "attention"
-        class_head_type="class_attention",  # other options: "linear_average_pool", "summation", "flatten"
-        model_kwargs=model_kwargs,
-        use_continuous_input=True,
-        scheduler_lightning_kwargs={
-            "monitor": "val_loss",
-            "mode": "min",
-            "interval": "step",
-            "frequency": 1,
-        },
-    )
-
-    # -------------------------------------------------------------------------
-    # ------------------ Aachen Anomaly Detection Model -----------------------
-    # -------------------------------------------------------------------------
-
-    # model = BackboneAachenClassificationLightning(
+    # model = BackboneDijetClassificationLightning(
     #     optimizer=torch.optim.AdamW,
     #     optimizer_kwargs={
     #         "lr": 1e-3,
@@ -553,6 +427,7 @@ def main():
     #     },
     #     scheduler=scheduler_with_params,
     #     merge_strategy=args.merge_strategy,  # other options: "average", "weighted_sum", "attention"
+    #     class_head_type="class_attention",  # other options: "linear_average_pool", "summation", "flatten"
     #     model_kwargs=model_kwargs,
     #     use_continuous_input=True,
     #     scheduler_lightning_kwargs={
@@ -563,29 +438,44 @@ def main():
     #     },
     # )
 
-    
-    # Load pre-trained backbone weights if requested
-    if args.load_pretrained and args.pretrained_ckpt:
-        print(f"Loading pre-trained backbone weights from: {args.pretrained_ckpt}")
-        load_pretrained_backbone(model, args.pretrained_ckpt)
-        print("Successfully loaded pre-trained backbone weights!")
+    # -------------------------------------------------------------------------
+    # ------------------ Aachen Anomaly Detection Model -----------------------
+    # -------------------------------------------------------------------------
+
+    model = BackboneAachenClassificationLightning(
+        optimizer=torch.optim.AdamW,
+        optimizer_kwargs={
+            "lr": 1e-3,
+            "weight_decay": 1e-2,
+            "partial": True,
+        },
+        scheduler=scheduler_with_params,
+        merge_strategy=args.merge_strategy,  # other options: "average", "weighted_sum", "attention"
+        model_kwargs=model_kwargs,
+        use_continuous_input=True,
+        scheduler_lightning_kwargs={
+            "monitor": "val_loss",
+            "mode": "min",
+            "interval": "step",
+            "frequency": 1,
+        },
+    )
 
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model created with {num_params:,} parameters")
     
     # Log model configuration
     model_config = {
-        "architecture": "BackboneDijetClassificationLightning",
+        "architecture": "BackboneAachenClassificationLightning",
+        "merge_strategy": args.merge_strategy,
         "class_head_type": "class_attention",
         "use_continuous_input": True,
         "num_parameters": num_params,
         "embedding_dim": args.embedding_dim,
-        "n_transformer_blocks": 8,  # Updated to match pre-trained model
+        "n_transformer_blocks": 2,
         "num_attention_heads": 8,
         "max_sequence_len": 128,
         "n_output_classes": 2,
-        "pretrained_checkpoint": args.pretrained_ckpt if args.load_pretrained else None,
-        "load_pretrained": args.load_pretrained,
         "model_kwargs": {k: v for k, v in model_kwargs.items() if k != "particle_features_dict"},
     }
     
@@ -607,8 +497,6 @@ def main():
         "precision": "32",
         "early_stopping_patience": 15,
         "early_stopping_monitor": "val_loss",
-        "load_pretrained": args.load_pretrained,
-        "pretrained_ckpt": args.pretrained_ckpt,
         "use_class_weights": args.use_class_weights,
         "class_weights": model_kwargs.get("class_weights", None),
     }
@@ -636,7 +524,6 @@ def main():
         dirpath=exp_logger.get_checkpoint_dir(),
         filename="anomaly_detector_{epoch:02d}_{val_loss:.4f}",
         monitor="val_loss",
-        every_n_epochs=50,
         mode="min",
         save_top_k=3,
         save_last=True,
@@ -645,9 +532,9 @@ def main():
     # Alternatively, monitor AUC instead of loss
     # checkpoint_callback = ModelCheckpoint(
     #     dirpath=exp_logger.get_checkpoint_dir(),
-    #     filename="anomaly_detector_{epoch:02d}_{val_loss:.4f}",
-    #     monitor="val_loss",
-    #     mode="min",
+    #     filename="anomaly_detector_{epoch:02d}_{val_auc:.4f}",
+    #     monitor="val_auc",
+    #     mode="max",
     #     save_top_k=3,
     #     save_last=True,
     # )
@@ -661,10 +548,16 @@ def main():
 
     # AUC callback: computes ROC AUC on validation set each epoch and logs it
     auc_callback = AUCCallback()
+    
+    # Metrics logging callback
+    metrics_callback = MetricsLoggingCallback(exp_logger, log_every_n_steps=20)
 
-    # Setup W&B logger
+    # Setup loggers
     loggers = []
+    
+    # W&B logger
     if args.use_wandb:
+        # Use custom run name if provided, otherwise use ExperimentLogger's run name
         wandb_run_name = args.wandb_run_name if args.wandb_run_name else exp_logger.run_name
         
         wandb_logger = WandbLogger(
@@ -673,7 +566,7 @@ def main():
             name=wandb_run_name,
             save_dir=str(exp_logger.run_dir),
             config=full_config,
-            log_model=True,
+            log_model=True,  # Log model checkpoints to W&B
         )
         loggers.append(wandb_logger)
         
@@ -695,12 +588,15 @@ def main():
         max_steps=args.max_steps,
         accelerator="auto",
         devices=1,
-        logger=loggers if loggers else False,
-        callbacks=[checkpoint_callback, auc_callback],  # early_stop_callback removed
+        logger=loggers,
+        callbacks=[checkpoint_callback, auc_callback, metrics_callback],
         log_every_n_steps=20,
-        gradient_clip_val=1,
+        val_check_interval=0.1,  # Validate every 10% of training data
+        gradient_clip_val=1.0,
         precision="32",
         num_nodes=1,
+        enable_progress_bar=True,
+        enable_model_summary=True,
     )
 
     # ============================================================
@@ -713,6 +609,10 @@ def main():
             val_dataloaders=val_loader,
         )
         
+        # Save final metrics and plots
+        exp_logger.save_metrics()
+        exp_logger.plot_training_curves()
+        
         # Log final results
         exp_logger.log_final_results(trainer, checkpoint_callback)
         
@@ -721,6 +621,7 @@ def main():
         print(f"Best checkpoint: {checkpoint_callback.best_model_path}")
         print(f"Best validation loss: {checkpoint_callback.best_model_score:.4f}")
         print(f"Results saved to: {exp_logger.run_dir}")
+        print(f"Training curves: {exp_logger.run_dir / 'plots' / 'training_curves.png'}")
         if args.use_wandb:
             print(f"W&B run: {wandb.run.url}")
             wandb.finish()
@@ -732,6 +633,14 @@ def main():
         print(f"Partial results saved to: {exp_logger.run_dir}")
         print("=" * 80 + "\n")
         
+        # Still try to save what we have
+        try:
+            exp_logger.save_metrics()
+            exp_logger.plot_training_curves()
+        except:
+            pass
+        
+        # Finish W&B run
         if args.use_wandb:
             wandb.finish()
         
@@ -749,10 +658,12 @@ def main():
         print(f"Error: {e}")
         print("=" * 80 + "\n")
         
+        # Finish W&B run with error
         if args.use_wandb:
             wandb.finish(exit_code=1)
         
         raise
+
 
 if __name__ == "__main__":
     main()

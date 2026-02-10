@@ -1,0 +1,19 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Start debugpy in Apptainer (current file)",
+      "type": "shell",
+      "command": "apptainer exec --nv --bind /mnt/SAS_B/Soumya:/mnt/SAS_B/Soumya /mnt/SAS_B/Soumya/apptainer_images/gabbro.sif bash -lc \"source /opt/conda/bin/activate && python -m debugpy --listen 0.0.0.0:5678 --wait-for-client ${file}\"",
+      "presentation": { "reveal": "always", "panel": "new" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Start debugpy in Apptainer (train_aachen)",
+      "type": "shell",
+      "command": "apptainer exec --nv --bind /mnt/SAS_B/Soumya:/mnt/SAS_B/Soumya /mnt/SAS_B/Soumya/apptainer_images/gabbro.sif bash -lc \"source /opt/conda/bin/activate && python -m debugpy --listen 0.0.0.0:5678 --wait-for-client ${workspaceFolder}/train_aachen.py --jet_name both --merge_strategy concat --use_wandb\"",
+      "presentation": { "reveal": "always", "panel": "new" },
+      "problemMatcher": []
+    }
+  ]
+}

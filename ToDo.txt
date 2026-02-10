@@ -1,3 +1,12 @@
-[ ] Evaluate all attention trained models
+[✓] Evaluate available attention trained models
+[ ] Train remaining attention based models
 [ ] Train models for aachen classification head
-[ ] 
+[ ] Run dijet training on weakly supervised 2k data with all 4 merge strategies
+[ ] Run dijet training on all weakly supervised cases
+[ ] Pretrain model on JetClass data
+[ ] Run finetuning on the pre-trained model of Supervised and Weakly supervised cases
+[ ] Write the thesis document
+[ ] Get GPU access
+
+[ ] Find PhD groups and positions
+[ ] Fix CV for CERN application

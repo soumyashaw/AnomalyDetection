@@ -2563,7 +2563,8 @@ class BackboneAachenClassificationLightning(L.LightningModule):
         logits = model_step_output["logits"]
         targets = model_step_output["targets"]
 
-        preds = torch.softmax(logits, dim=1)
+        # Use precomputed probs from model_step (already in correct shape)
+        preds = model_step_output["probs"]
         if stage == "train":
             self.train_preds_list.append(preds.float().detach().cpu().numpy())
             self.train_labels_list.append(targets.float().detach().cpu().numpy())

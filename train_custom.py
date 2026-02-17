@@ -636,7 +636,6 @@ def main():
         dirpath=exp_logger.get_checkpoint_dir(),
         filename="anomaly_detector_{epoch:02d}_{val_loss:.4f}",
         monitor="val_loss",
-        every_n_epochs=50,
         mode="min",
         save_top_k=3,
         save_last=True,

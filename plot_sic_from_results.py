@@ -168,15 +168,21 @@ def plot_sic_curve_multiple_models(
     """
     fig, ax = plt.subplots(figsize=figsize)
     
+    # Create color palette using turbo colormap for high contrast
+    n_models = len(predictions_dict)
+    colors = [plt.cm.turbo(i / (n_models - 1)) for i in range(n_models)] if n_models > 1 else [plt.cm.turbo(0)]
+    
     # Plot SIC curve for each model
-    for model_name, (y_true, y_scores) in predictions_dict.items():
+    for idx, (model_name, (y_true, y_scores)) in enumerate(predictions_dict.items()):
         tpr, sic = calculate_sic(y_true, y_scores, signal_ratio=signal_ratio)
-        ax.plot(tpr, sic, linewidth=2.0, label=model_name)
+        max_sic = np.max(sic)
+        label = f'{model_name} (Max SIC = {max_sic:.1f})'
+        ax.plot(tpr, sic, linewidth=1.5, label=label, color=colors[idx])
     
     # Plot random classifier baseline
     tpr_random = np.linspace(0, 1, 1000)
     sic_random = np.sqrt(tpr_random)
-    ax.plot(tpr_random, sic_random, 'k--', linewidth=2, label='random', alpha=0.7)
+    ax.plot(tpr_random, sic_random, 'k--', linewidth=1.5, label='random', alpha=0.7)
     
     # Formatting
     ax.set_xlabel('True Positive Rate', fontsize=14)
@@ -227,8 +233,12 @@ def plot_roc_curve_multiple_models(
     """
     fig, ax = plt.subplots(figsize=figsize)
     
+    # Create color palette using turbo colormap for high contrast
+    n_models = len(predictions_dict)
+    colors = [plt.cm.turbo(i / (n_models - 1)) for i in range(n_models)] if n_models > 1 else [plt.cm.turbo(0)]
+    
     # Plot ROC curve for each model (TPR on x-axis, 1/FPR on y-axis)
-    for model_name, (y_true, y_scores) in predictions_dict.items():
+    for idx, (model_name, (y_true, y_scores)) in enumerate(predictions_dict.items()):
         fpr, tpr, _ = roc_curve(y_true, y_scores)
         roc_auc = auc(fpr, tpr)
         
@@ -238,12 +248,16 @@ def plot_roc_curve_multiple_models(
         tpr_valid = tpr[valid_idx]
         inv_fpr = 1.0 / fpr_valid
         
-        ax.plot(tpr_valid, inv_fpr, linewidth=2.0, label=f'{model_name} (AUC = {roc_auc:.3f})')
+        # Add starting point atTPR=0 to make curve touch y-axis
+        tpr_plot = np.concatenate([[0], tpr_valid])
+        inv_fpr_plot = np.concatenate([[inv_fpr[0]], inv_fpr])
+        
+        ax.plot(tpr_plot, inv_fpr_plot, linewidth=1.5, label=f'{model_name} (AUC = {roc_auc:.3f})', color=colors[idx])
     
     # Plot random classifier baseline (TPR = FPR => 1/FPR = 1/TPR)
     tpr_random = np.linspace(0.001, 1, 1000)  # TPR from 0.001 to 1
     inv_fpr_random = 1.0 / tpr_random
-    ax.plot(tpr_random, inv_fpr_random, 'k--', linewidth=2, label='random', alpha=0.7)
+    ax.plot(tpr_random, inv_fpr_random, 'k--', linewidth=1.5, label='random', alpha=0.7)
     
     # Formatting
     ax.set_xlabel('True Positive Rate', fontsize=14)
@@ -332,22 +346,36 @@ def plot_r30_vs_signal_ratio(
     r30_values = []
     
     for label, (y_true, y_scores) in predictions_dict.items():
-        # Extract percentage from label (e.g., "0.60%" -> 0.60)
+        # Extract percentage from label (e.g., "0.60%" -> 0.60 or "0.6%" -> 0.6)
         try:
-            ratio = float(label.rstrip('%'))
-            signal_ratios.append(ratio)
+            # Remove '%' and convert to float
+            ratio_str = label.rstrip('%').strip()
+            ratio = float(ratio_str)
             r30 = calculate_r30(y_true, y_scores)
+            
+            # Skip infinite or invalid values
+            if np.isinf(r30) or np.isnan(r30):
+                print(f"Warning: R30 for {label} is {r30} (skipping)")
+                continue
+                
+            signal_ratios.append(ratio)
             r30_values.append(r30)
-        except ValueError:
-            print(f"Warning: Could not parse signal ratio from label '{label}'")
+            print(f"Calculated R30 for {label}: {r30:.2f}")
+        except (ValueError, TypeError) as e:
+            print(f"Warning: Could not parse signal ratio from label '{label}': {e}")
             continue
+    
+    if len(signal_ratios) == 0:
+        print("Error: No valid signal ratios found!")
+        return None
     
     # Sort by signal ratio
     sorted_pairs = sorted(zip(signal_ratios, r30_values))
     signal_ratios, r30_values = zip(*sorted_pairs)
     
-    # Plot
-    ax.plot(signal_ratios, r30_values, marker='o', markersize=8, linewidth=2.0, color='#1f77b4')
+    # Plot with continuous line
+    ax.plot(signal_ratios, r30_values, marker='o', markersize=8, linewidth=2.0, 
+            color='#1f77b4', linestyle='-', markeredgewidth=1.5, markeredgecolor='white')
     
     # Formatting
     ax.set_xlabel('Signal fraction [%]', fontsize=14)
@@ -421,7 +449,7 @@ def main():
         "--signal_ratios", 
         type=float, 
         nargs='+',
-        default=[0.1, 0.3, 0.5, 1.0],
+        default=[0.6, 1.0, 2.0, 5.0, 10.0, 100.0],
         help="Signal ratios to plot (e.g., 0.1 0.3 0.5 1.0)"
     )
     parser.add_argument(

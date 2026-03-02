@@ -12,7 +12,7 @@ cd $HOME/AnomalyDetection
 
 apptainer exec --nv $IMG bash -c "
     source /opt/conda/bin/activate
-    python train_custom.py --gpu_id 0 --seed 42 --jet_name both --merge_strategy attention --use_wandb
+    python train_custom_aachen.py --gpu_id 0 --seed 42 --jet_name both --merge_strategy concat --use_wandb
 "
 
 echo "Job finished."

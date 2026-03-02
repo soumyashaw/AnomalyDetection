@@ -1,12 +1,36 @@
 [✓] Evaluate available attention trained models
-[ ] Train remaining attention based models
-[ ] Train models for aachen classification head
-[ ] Run dijet training on weakly supervised 2k data with all 4 merge strategies
-[ ] Run dijet training on all weakly supervised cases
+[✓] Train remaining attention based models
+[✓] Train models for aachen classification head
+[✓] Run dijet training on weakly supervised 5k data with all 4 merge strategies
+[✓] Train Weakly Supervised models for aachen classification head
+[✓] Run dijet training on all weakly supervised cases
+[✓] Plot SIC plots and get max SIC value
+[ ] Setup env format for the project
 [ ] Pretrain model on JetClass data
+[ ] Read and implement Marie's paper: How to pick the best anomaly detector?
+[ ] Design and run an experiment to show Grokking effect (maybe test on every 10 epochs)
+[ ] Show Humberto the plots of WandB
+[ ] Save the metadata of n_train_jets to WandB as well
 [ ] Run finetuning on the pre-trained model of Supervised and Weakly supervised cases
+[ ] Design and run an experiment to show Grokking effect (maybe test on every 10 epochs)
+[ ] Use the new metric suggested by Marie for Training
+[ ] Test the setup on Non idealised Anomaly Detection (CwoLa case)
 [ ] Write the thesis document
 [ ] Get GPU access
 
 [ ] Find PhD groups and positions
 [ ] Fix CV for CERN application
+
+Currently running:
+[✓] python train_aachen.py --gpu_id 0 --seed 42 --jet_name both --merge_strategy attention --use_wandb
+[✓] python train.py --gpu_id 0 --seed 73 --jet_name both --merge_strategy attention --use_wandb
+[✓] python train.py --gpu_id 0 --seed 109 --jet_name both --merge_strategy attention --use_wandb
+[✓] python train_custom_aachen.py --gpu_id 2 --seed 42 --jet_name both --merge_strategy concat --use_wandb (10000)
+[✓] python train_custom_aachen.py --gpu_id 2 --seed 42 --jet_name both --merge_strategy concat --use_wandb (5000)
+[✓] python train_custom_aachen.py --gpu_id 2 --seed 42 --jet_name both --merge_strategy concat --use_wandb (2000)
+[✓] python train_custom_aachen.py --gpu_id 2 --seed 42 --jet_name both --merge_strategy concat --use_wandb (1000)
+[✓] python train_custom_aachen.py --gpu_id 2 --seed 42 --jet_name both --merge_strategy concat --use_wandb (600)
+
+Next:
+
+Remember train has 2 transformer blocks, train_custom has 8 transformer blocks

@@ -33,6 +33,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, Callback
 from sklearn.metrics import roc_auc_score
 from lightning.pytorch.loggers import WandbLogger
+from dotenv import load_dotenv
 from datetime import datetime
 from pathlib import Path
 import matplotlib.pyplot as plt
@@ -44,6 +45,7 @@ from gabbro.data.data_utils import create_lhco_h5_dataloaders
 from gabbro.models.backbone import BackboneClassificationLightning, BackboneDijetClassificationLightning, BackboneAachenClassificationLightning
 from gabbro.data.loading import load_lhco_jets_from_h5, load_multiple_h5_files
 
+load_dotenv()  # Load environment variables from .env file (for W&B API key, etc.)
 
 class ExperimentLogger:
     """Handles logging of experiment configuration and results."""
@@ -309,23 +311,23 @@ class MetricsLoggingCallback(Callback):
 
 def main():
     parser = argparse.ArgumentParser(description="OmniJet-alpha Anomaly Detection Training Script")
-    parser.add_argument("--dataset_path", default="/mnt/SAS_B/Soumya/LHCO/test_small", type=str, help="Path to the LHCO dataset")
-    parser.add_argument("--gpu_id", type=int, default=2, help="GPU ID to use for computation")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
-    parser.add_argument("--jet_name", type=str, default="jet1", choices=["jet1", "jet2", "both"], help="Name of the jet to use from the dataset")
-    parser.add_argument("--merge_strategy", type=str, default="concat", choices=["concat", "average", "weighted_sum", "attention"], help="Merge strategy for dijet model")
-    parser.add_argument("--batch_size", type=int, default=64, help="Batch size for training")
-    parser.add_argument("--max_steps", type=int, default=1000000, help="Maximum number of training steps")
-    parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate")
-    parser.add_argument("--train_val_split", type=float, default=0.7, help="Train/validation split ratio")
-    parser.add_argument("--n_jets_train", type=list, default=[25000, 200000], help="Number of jets per class for training [signal, background]")
-    parser.add_argument("--embedding_dim", type=int, default=128, help="Embedding dimension")
-    parser.add_argument("--log_dir", type=str, default="aachen_head_expts", help="Directory for experiment logs")
+    parser.add_argument("--dataset_path", default=str(os.getenv("DATASET_PATH")), type=str, help="Path to the LHCO dataset")
+    parser.add_argument("--gpu_id", type=int, default=int(os.getenv("GPU_ID")), help="GPU ID to use for computation")
+    parser.add_argument("--seed", type=int, default=int(os.getenv("SEED")), help="Random seed for reproducibility")
+    parser.add_argument("--jet_name", type=str, default=str(os.getenv("JET_NAME")), choices=["jet1", "jet2", "both"], help="Name of the jet to use from the dataset")
+    parser.add_argument("--merge_strategy", type=str, default=str(os.getenv("MERGE_STRATEGY")), choices=["concat", "average", "weighted_sum", "attention"], help="Merge strategy for dijet model")
+    parser.add_argument("--batch_size", type=int, default=int(os.getenv("BATCH_SIZE")), help="Batch size for training")
+    parser.add_argument("--max_steps", type=int, default=int(os.getenv("MAX_STEPS")), help="Maximum number of training steps")
+    parser.add_argument("--learning_rate", type=float, default=float(os.getenv("LEARNING_RATE")), help="Learning rate")
+    parser.add_argument("--train_val_split", type=float, default=float(os.getenv("TRAIN_VAL_SPLIT")), help="Train/validation split ratio")
+    parser.add_argument("--n_jets_train", type=list, default=list(map(int,os.getenv("N_JETS_TRAIN").strip('[]').split(','))), help="Number of jets per class for training [signal, background]")
+    parser.add_argument("--embedding_dim", type=int, default=int(os.getenv("EMBEDDING_DIM")), help="Embedding dimension")
+    parser.add_argument("--log_dir", type=str, default=str(os.getenv("LOG_DIR_AACHEN")), help="Directory for experiment logs")
     parser.add_argument("--use_class_weights", type=lambda x: x.lower() == 'true', default=True, help="Use automatic class weighting for imbalanced data (default: True)")
     
     # W&B arguments
     parser.add_argument("--use_wandb", action="store_true", help="Enable Weights & Biases logging")
-    parser.add_argument("--wandb_project", type=str, default="OmniJet-alpha", help="W&B project name")
+    parser.add_argument("--wandb_project", type=str, default=str(os.getenv("WANDB_PROJECT")), help="W&B project name")
     parser.add_argument("--wandb_entity", type=str, default=None, help="W&B entity/team name (optional)")
     parser.add_argument("--wandb_run_name", type=str, default=None, help="W&B run name (optional, auto-generated if not provided)")
     
@@ -364,6 +366,8 @@ def main():
 
     print("n_jets_train:", args.n_jets_train)
     print("Using Jet:", args.jet_name)
+    print("Merge strategy:", args.merge_strategy)
+
 
     # Log data configuration
     data_config = {

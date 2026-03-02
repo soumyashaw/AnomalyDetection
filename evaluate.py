@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
 from datetime import datetime
+from dotenv import load_dotenv
 from sklearn.metrics import (
     roc_curve, auc, confusion_matrix, classification_report,
     precision_recall_curve, average_precision_score
@@ -23,6 +24,8 @@ from gabbro.models.backbone import (
     BackboneAachenClassificationLightning,
 )
 from gabbro.data.data_utils import create_lhco_h5_test_loader
+
+load_dotenv()  # Load environment variables from .env file (for W&B API key, etc.)
 
 
 class DataCache:
@@ -45,7 +48,7 @@ class DataCache:
         cache_key = self._get_cache_key(h5_files, n_jets, feature_dict, max_sequence_len, model_type)
         file_str = "_".join([Path(f).stem for f in h5_files])
         n_jets_str = "_".join(map(str, n_jets))
-        type_str = "dijet" if model_type == "dijet" else "single"
+        type_str = "dijet" if model_type in ["dijet", "aachen"] else "single"
         return self.cache_dir / f"data_{type_str}_{file_str}_{n_jets_str}_{cache_key}.pkl"
     
     def load(self, h5_files, n_jets, feature_dict, max_sequence_len, model_type="single"):
@@ -92,7 +95,7 @@ def extract_data_from_loader(dataloader, model_type="single"):
     -------
     dict
         Dictionary with tensors for features, masks, labels
-        For dijet: includes 'features', 'features_jet2', 'masks', 'masks_jet2', 'labels'
+        For dijet/aachen: includes 'features', 'features_jet2', 'masks', 'masks_jet2', 'labels'
         For single: includes 'features', 'masks', 'labels'
     """
     all_features = []
@@ -107,8 +110,8 @@ def extract_data_from_loader(dataloader, model_type="single"):
         all_masks.append(batch["part_mask"])
         all_labels.append(batch["jet_type_labels"])
         
-        # For dijet models, also extract jet2 data
-        if model_type == "dijet" and "part_features_jet2" in batch:
+        # For dijet and aachen models, also extract jet2 data
+        if model_type in ["dijet", "aachen"] and "part_features_jet2" in batch:
             all_features_jet2.append(batch["part_features_jet2"])
             all_masks_jet2.append(batch["part_mask_jet2"])
         
@@ -121,8 +124,8 @@ def extract_data_from_loader(dataloader, model_type="single"):
         "labels": torch.cat(all_labels, dim=0),
     }
     
-    # Add jet2 data for dijet models
-    if model_type == "dijet" and all_features_jet2:
+    # Add jet2 data for dijet and aachen models
+    if model_type in ["dijet", "aachen"] and all_features_jet2:
         result["features_jet2"] = torch.cat(all_features_jet2, dim=0)
         result["masks_jet2"] = torch.cat(all_masks_jet2, dim=0)
     
@@ -137,7 +140,7 @@ def create_loader_from_cached_data(cached_data, batch_size, model_type="single")
     cached_data : dict
         Dictionary with cached tensors
         For single: 'features', 'masks', 'labels'
-        For dijet: 'features', 'features_jet2', 'masks', 'masks_jet2', 'labels'
+        For dijet/aachen: 'features', 'features_jet2', 'masks', 'masks_jet2', 'labels'
     batch_size : int
         Batch size for DataLoader
     model_type : str
@@ -148,8 +151,8 @@ def create_loader_from_cached_data(cached_data, batch_size, model_type="single")
     DataLoader
         DataLoader wrapping the cached data
     """
-    if model_type == "dijet":
-        # Dijet dataset with both jets
+    if model_type in ["dijet", "aachen"]:
+        # Dijet and Aachen datasets with both jets
         class DijetCachedDataset(torch.utils.data.Dataset):
             def __init__(self, features, features_jet2, masks, masks_jet2, labels):
                 self.features = features
@@ -295,23 +298,31 @@ class ModelEvaluator:
                 labels = batch["jet_type_labels"]
                 
                 # Forward pass based on model type
-                if self.model_type == "dijet":
-                    # Dijet model needs both jets
+                if self.model_type in ["dijet", "aachen"]:
+                    # Dijet and Aachen models need both jets
                     X1 = batch["part_features"].to(self.device)
                     X2 = batch["part_features_jet2"].to(self.device)
                     mask1 = batch["part_mask"].to(self.device)
                     mask2 = batch["part_mask_jet2"].to(self.device)
                     logits = self.model(X1, mask1, X2, mask2)
                 else:
-                    # Single-jet or Aachen model needs only one jet
+                    # Single-jet model needs only one jet
                     X = batch["part_features"].to(self.device)
                     mask = batch["part_mask"].to(self.device)
                     logits = self.model(X, mask)
                 
-                probs = torch.softmax(logits, dim=1)
+                # Handle different logit shapes
+                if logits.dim() == 1:
+                    # Binary classification with single output (BCEWithLogitsLoss)
+                    # Shape: (B,) - used by Aachen model
+                    probs = torch.sigmoid(logits)  # Probability of signal class
+                    all_preds.append(probs.cpu().numpy())
+                else:
+                    # Multi-class classification with 2 outputs (CrossEntropyLoss)
+                    # Shape: (B, 2) - used by single-jet and dijet models
+                    probs = torch.softmax(logits, dim=1)
+                    all_preds.append(probs[:, 1].cpu().numpy())
                 
-                # Collect predictions (probability of signal class)
-                all_preds.append(probs[:, 1].cpu().numpy())
                 all_labels.append(labels.cpu().numpy())
                 all_logits.append(logits.cpu().numpy())
                 
@@ -618,21 +629,21 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate Anomaly Detection Model")
     parser.add_argument("--checkpoint", type=str, required=True, 
                        help="Path to model checkpoint")
-    parser.add_argument("--model_type", type=str, default="single",
+    parser.add_argument("--model_type", type=str,
                        choices=["single", "dijet", "aachen"],
                        help="Model architecture type")
     parser.add_argument("--dataset_path", type=str, 
-                       default="/.automount/net_rw/net__data_ttk/soshaw",
+                       default=str(os.getenv("DATASET_PATH")),
                        help="Path to LHCO dataset")
-    parser.add_argument("--batch_size", type=int, default=64,
+    parser.add_argument("--batch_size", type=int, default=int(os.getenv("BATCH_SIZE")),
                        help="Batch size for evaluation")
-    parser.add_argument("--n_jets_test", type=int, nargs='+', default=[50000, 200000],
+    parser.add_argument("--n_jets_test", type=int, nargs='+', default=list(map(int,os.getenv("N_JETS_TEST").strip('[]').split(','))),
                        help="Number of jets per class for testing [signal, background]")
     parser.add_argument("--threshold", type=float, default=0.5,
                        help="Classification threshold")
-    parser.add_argument("--output_dir", type=str, default="results",
+    parser.add_argument("--output_dir", type=str, default=str(os.getenv("OUTPUT_DIR")),
                        help="Directory to save evaluation results")
-    parser.add_argument("--gpu_id", type=int, default=0,
+    parser.add_argument("--gpu_id", type=int, default=int(os.getenv("GPU_ID")),
                        help="GPU ID to use for evaluation")
     parser.add_argument("--clear_cache", action="store_true",
                        help="Clear cached data and reload from HDF5 files")
@@ -662,9 +673,9 @@ def main():
     h5_files_test = [signal_path, background_path]
     
     # Determine jet_name based on model type
-    if args.model_type == "dijet":
+    if args.model_type in ["dijet", "aachen"]:
         jet_name = "both"
-        print("Loading both jets for dijet model evaluation...")
+        print(f"Loading both jets for {args.model_type} model evaluation...")
     else:
         jet_name = "jet1"
         print("Loading single jet for evaluation...")

@@ -5,10 +5,11 @@
 [✓] Train Weakly Supervised models for aachen classification head
 [✓] Run dijet training on all weakly supervised cases
 [✓] Plot SIC plots and get max SIC value
-[ ] Setup env format for the project
+[ ] Restore saving top 3 checkpoints after Grokking expt for train_custom.py and train_custom_aachen.py
+[✓] Setup env format for the project
 [ ] Pretrain model on JetClass data
 [ ] Read and implement Marie's paper: How to pick the best anomaly detector?
-[ ] Design and run an experiment to show Grokking effect (maybe test on every 10 epochs)
+[✓] Design and run an experiment to show Grokking effect (maybe test on every 10 epochs)
 [ ] Show Humberto the plots of WandB
 [ ] Save the metadata of n_train_jets to WandB as well
 [ ] Run finetuning on the pre-trained model of Supervised and Weakly supervised cases

@@ -1,5 +1,4 @@
 """Evaluate trained anomaly detection model with comprehensive metrics and plots."""
-
 import os
 import json
 import torch
@@ -244,11 +243,11 @@ class ModelEvaluator:
         # Load model based on type
         print(f"Loading {model_type} model from {checkpoint_path}")
         if self.model_type == "dijet":
-            self.model = BackboneDijetClassificationLightning.load_from_checkpoint(checkpoint_path)
+            self.model = BackboneDijetClassificationLightning.load_from_checkpoint(checkpoint_path, map_location='cpu')
         elif self.model_type == "aachen":
-            self.model = BackboneAachenClassificationLightning.load_from_checkpoint(checkpoint_path)
+            self.model = BackboneAachenClassificationLightning.load_from_checkpoint(checkpoint_path, map_location='cpu')
         elif self.model_type == "single":
-            self.model = BackboneClassificationLightning.load_from_checkpoint(checkpoint_path)
+            self.model = BackboneClassificationLightning.load_from_checkpoint(checkpoint_path, map_location='cpu')
         else:
             raise ValueError(f"Unknown model_type: {model_type}. Choose from 'single', 'dijet', or 'aachen'")
         

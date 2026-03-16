@@ -9,7 +9,7 @@ cd $HOME/AnomalyDetection
 
 apptainer exec --nv $IMG bash -c "
     source /opt/conda/bin/activate
-    python evaluate.py --checkpoint dijet_expts/run_supervised_attn_seed2_20260203_022016/checkpoints/anomaly_detector_epoch\=71_val_loss\=0.0955.ckpt --gpu_id 0
+    python evaluate_true_roc.py --checkpoint_folder dijet_expts/run_20260312_170307/checkpoints/ --model_type dijet
     "   
 
 echo "Job finished."

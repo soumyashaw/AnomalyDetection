@@ -28,5 +28,3 @@ Currently running:
 
 
 Next:
-
-Remember train has 2 transformer blocks, train_custom has 8 transformer blocks

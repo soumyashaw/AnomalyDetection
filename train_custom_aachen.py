@@ -718,16 +718,6 @@ def main():
     #     save_last=False,
     # )
 
-    ######################################
-    # Delete after Grokking Expt
-    ######################################
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=exp_logger.get_checkpoint_dir(),
-        filename="epoch_{epoch:02d}",
-        every_n_epochs=10,
-        save_top_k=-1,  # Save all periodic checkpoints
-    )
-
     # Alternatively, monitor AUC instead of loss
     # checkpoint_callback = ModelCheckpoint(
     #     dirpath=exp_logger.get_checkpoint_dir(),
@@ -739,14 +729,14 @@ def main():
     # )
 
     # Or using ARGOS metric
-    # checkpoint_callback = ModelCheckpoint(
-    #     dirpath=exp_logger.get_checkpoint_dir(),
-    #     filename="epoch_{epoch:02d}_{val_argos:.4f}",
-    #     monitor="val_argos",
-    #     mode="max",
-    #     save_top_k=3,
-    #     save_last=False,
-    # )
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=exp_logger.get_checkpoint_dir(),
+        filename="epoch_{epoch:02d}_{val_argos:.4f}",
+        monitor="val_argos",
+        mode="max",
+        save_top_k=3,
+        save_last=False,
+    )
     
     # Early stopping disabled
     # early_stop_callback = EarlyStopping(

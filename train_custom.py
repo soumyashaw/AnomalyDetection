@@ -31,7 +31,7 @@ from functools import partial
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, TensorDataset
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, Callback
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, roc_curve
 from lightning.pytorch.loggers import WandbLogger
 from dotenv import load_dotenv
 from datetime import datetime
@@ -266,6 +266,72 @@ class AUCCallback(Callback):
         pl_module.log("val_auc", auc_val, prog_bar=True, logger=True)
 
 
+class ARGOSCallback(Callback):
+    """Compute ARGOS metric on the validation set at the end of each validation epoch.
+    ARGOS is defined as: max(tpr/sqrt(fpr) - sqrt(tpr)) for fpr > 0.
+    """
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        # Get validation dataloader
+        try:
+            val_loaders = trainer.val_dataloaders
+        except Exception:
+            val_loaders = None
+        if not val_loaders:
+            return
+
+        # Handle both single DataLoader and list of DataLoaders
+        if isinstance(val_loaders, list):
+            val_loader = val_loaders[0]
+        else:
+            val_loader = val_loaders
+            
+        device = pl_module.device if hasattr(pl_module, 'device') else (torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu'))
+
+        all_preds = []
+        all_labels = []
+
+        pl_module.eval()
+        with torch.no_grad():
+            for batch in val_loader:
+                labels = batch["jet_type_labels"].to(device)
+                
+                # Check if model is dijet or single-jet
+                if isinstance(pl_module, BackboneDijetClassificationLightning):
+                    X1 = batch["part_features"].to(device)
+                    X2 = batch["part_features_jet2"].to(device)
+                    mask1 = batch["part_mask"].to(device)
+                    mask2 = batch["part_mask_jet2"].to(device)
+                    logits = pl_module(X1, mask1, X2, mask2)
+                else:
+                    X = batch["part_features"].to(device)
+                    mask = batch["part_mask"].to(device)
+                    logits = pl_module(X, mask)
+                
+                probs = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
+                all_preds.append(probs)
+                all_labels.append(labels.cpu().numpy())
+
+        if len(all_preds) == 0:
+            return
+
+        y_pred = np.concatenate(all_preds)
+        y_true = np.concatenate(all_labels)
+
+        # Compute ARGOS metric
+        try:
+            fpr, tpr, thresholds = roc_curve(y_true, y_pred)
+            inds = np.nonzero(fpr)
+            tpr = tpr[inds]
+            fpr = fpr[inds]
+            argos = float(np.max(tpr/np.sqrt(fpr) - np.sqrt(tpr)))
+        except Exception:
+            argos = float('nan')
+
+        # Log the metric
+        pl_module.log("val_argos", argos, prog_bar=True, logger=True)
+
+
 def load_pretrained_backbone(model, ckpt_path, strict=False):
     """Load pre-trained backbone weights from a checkpoint.
     
@@ -488,11 +554,15 @@ def main():
         print("Class weighting disabled - using standard CrossEntropyLoss")
         model_kwargs["class_weights"] = None
 
-    scheduler_with_params = partial(
-        torch.optim.lr_scheduler.CosineAnnealingLR,
-        T_max=1000000,
-        eta_min=1e-6,  # minimum learning rate
-    )
+    # For constant learning rate, use ConstantLR
+    scheduler_with_params = torch.optim.lr_scheduler.ConstantLR
+    
+    # For cosine annealing, uncomment the following:
+    # scheduler_with_params = partial(
+    #     torch.optim.lr_scheduler.CosineAnnealingLR,
+    #     T_max=args.max_steps,
+    #     eta_min=1e-6, # minimum learning rate
+    # )
 
     # -------------------------------------------------------------------------
     # ---------------------- Single Jet Data Model ----------------------------
@@ -502,17 +572,16 @@ def main():
     # model = BackboneClassificationLightning(
     #     optimizer=torch.optim.AdamW,
     #     optimizer_kwargs={
-    #         "lr": 1e-3,
+    #         "lr": args.learning_rate,
     #         "weight_decay": 1e-2,
-    #         "partial": True,
     #     },
     #     scheduler=scheduler_with_params,
     #     class_head_type="class_attention",  # other options: "linear_average_pool", "summation", "flatten"
     #     model_kwargs=model_kwargs,
     #     use_continuous_input=True,
     #     scheduler_lightning_kwargs={
-    #         "monitor": "val_loss",
-    #         "mode": "min",
+    #         "monitor": "val_argos",
+    #         "mode": "max",
     #         "interval": "step",
     #         "frequency": 1,
     #     },
@@ -525,9 +594,8 @@ def main():
     model = BackboneDijetClassificationLightning(
         optimizer=torch.optim.AdamW,
         optimizer_kwargs={
-            "lr": 1e-3,
+            "lr": args.learning_rate,
             "weight_decay": 1e-2,
-            "partial": True,
         },
         scheduler=scheduler_with_params,
         merge_strategy=args.merge_strategy,  # other options: "average", "weighted_sum", "attention"
@@ -535,8 +603,8 @@ def main():
         model_kwargs=model_kwargs,
         use_continuous_input=True,
         scheduler_lightning_kwargs={
-            "monitor": "val_loss",
-            "mode": "min",
+            "monitor": "val_argos",
+            "mode": "max",
             "interval": "step",
             "frequency": 1,
         },
@@ -549,17 +617,16 @@ def main():
     # model = BackboneAachenClassificationLightning(
     #     optimizer=torch.optim.AdamW,
     #     optimizer_kwargs={
-    #         "lr": 1e-3,
+    #         "lr": args.learning_rate,
     #         "weight_decay": 1e-2,
-    #         "partial": True,
     #     },
     #     scheduler=scheduler_with_params,
     #     merge_strategy=args.merge_strategy,  # other options: "average", "weighted_sum", "attention"
     #     model_kwargs=model_kwargs,
     #     use_continuous_input=True,
     #     scheduler_lightning_kwargs={
-    #         "monitor": "val_loss",
-    #         "mode": "min",
+    #         "monitor": "val_argos",
+    #         "mode": "max",
     #         "interval": "step",
     #         "frequency": 1,
     #     },
@@ -596,20 +663,17 @@ def main():
     training_config = {
         "optimizer": "AdamW",
         "optimizer_params": {
-            "lr": 1e-3,
+            "lr": args.learning_rate,
             "weight_decay": 1e-2,
-            "partial": True,
         },
-        "scheduler": "CosineAnnealingLR",
-        "scheduler_params": {
-            "T_max": 1000000,
-            "eta_min": 1e-6,
-        },
+        "scheduler": "ConstantLR",
         "max_steps": args.max_steps,
         "gradient_clip_val": 1.0,
         "precision": "32",
         "early_stopping_patience": 15,
-        "early_stopping_monitor": "val_loss",
+        "early_stopping_monitor": "val_argos",
+        "checkpoint_monitor": "val_argos",
+        "checkpoint_mode": "max",
         "load_pretrained": args.load_pretrained,
         "pretrained_ckpt": args.pretrained_ckpt,
         "use_class_weights": args.use_class_weights,
@@ -634,35 +698,58 @@ def main():
     exp_logger.log_config(full_config)
     print(f"Configuration saved to: {exp_logger.run_dir / 'config.json'}")
     
-    # Setup callbacks
+    # # Setup callbacks
+    # checkpoint_callback = ModelCheckpoint(
+    #     dirpath=exp_logger.get_checkpoint_dir(),
+    #     filename="epoch_{epoch:02d}_{val_loss:.4f}",
+    #     monitor="val_loss",
+    #     mode="min",
+    #     save_top_k=3,
+    #     save_last=False
+    # )
+
+    ######################################
+    # Delete after Grokking Expt
+    ######################################
     checkpoint_callback = ModelCheckpoint(
         dirpath=exp_logger.get_checkpoint_dir(),
-        filename="anomaly_detector_{epoch:02d}_{val_loss:.4f}",
-        monitor="val_loss",
-        mode="min",
-        save_top_k=3,
-        save_last=True,
+        filename="epoch_{epoch:02d}",
+        every_n_epochs=10,
+        save_top_k=-1,  # Save all periodic checkpoints
     )
 
     # Alternatively, monitor AUC instead of loss
     # checkpoint_callback = ModelCheckpoint(
     #     dirpath=exp_logger.get_checkpoint_dir(),
-    #     filename="anomaly_detector_{epoch:02d}_{val_loss:.4f}",
+    #     filename="epoch_{epoch:02d}_{val_loss:.4f}",
     #     monitor="val_loss",
     #     mode="min",
     #     save_top_k=3,
-    #     save_last=True,
+    #     save_last=False,
+    # )
+
+    # Or using ARGOS metric
+    # checkpoint_callback = ModelCheckpoint(
+    #     dirpath=exp_logger.get_checkpoint_dir(),
+    #     filename="epoch_{epoch:02d}_{val_argos:.4f}",
+    #     monitor="val_argos",
+    #     mode="max",
+    #     save_top_k=3,
+    #     save_last=False,
     # )
     
     # Early stopping disabled
     # early_stop_callback = EarlyStopping(
-    #     monitor="val_loss",
+    #     monitor="val_argos",
     #     patience=5,
-    #     mode="min",
+    #     mode="max",  # Higher ARGOS is better
     # )
 
     # AUC callback: computes ROC AUC on validation set each epoch and logs it
     auc_callback = AUCCallback()
+    
+    # ARGOS callback: computes ARGOS metric on validation set each epoch and logs it
+    argos_callback = ARGOSCallback()
 
     # Setup W&B logger
     loggers = []
@@ -698,7 +785,7 @@ def main():
         accelerator="auto",
         devices=1,
         logger=loggers if loggers else False,
-        callbacks=[checkpoint_callback, auc_callback],  # early_stop_callback removed
+        callbacks=[checkpoint_callback, auc_callback, argos_callback],  # early_stop_callback removed
         log_every_n_steps=20,
         gradient_clip_val=1,
         precision="32",

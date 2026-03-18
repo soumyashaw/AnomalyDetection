@@ -49,14 +49,18 @@ load_dotenv()  # Load environment variables from .env file (for W&B API key, etc
 class ExperimentLogger:
     """Handles logging of experiment configuration and results."""
     
-    def __init__(self, log_dir="logs"):
+    def __init__(self, log_dir="logs", naming_identifier=""):
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         
         # Create timestamp for this run
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.run_name = f"run_{self.timestamp}"
-        
+        identifier = str(naming_identifier).strip()
+        if identifier:
+            self.run_name = f"run_{identifier}_{self.timestamp}"
+        else:
+            self.run_name = f"run_{self.timestamp}"
+
         # Create run-specific directory
         self.run_dir = self.log_dir / self.run_name
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -449,6 +453,7 @@ def main():
     parser.add_argument("--train_val_split", type=float, default=float(os.getenv("TRAIN_VAL_SPLIT")), help="Train/validation split ratio")
     parser.add_argument("--n_jets_train", type=list, default=list(map(int,os.getenv("N_JETS_TRAIN_CUSTOM_AACHEN").strip('[]').split(','))), help="Number of jets per class for training [signal, supp, background]")
     parser.add_argument("--embedding_dim", type=int, default=int(os.getenv("EMBEDDING_DIM")), help="Embedding dimension")
+    parser.add_argument("--naming_identifier", type=str, default="", help="Optional identifier to add to the run name for easier tracking")
     parser.add_argument("--log_dir", type=str, default=str(os.getenv("LOG_DIR_AACHEN")), help="Directory for experiment logs")
     parser.add_argument("--pretrained_ckpt", type=str, help="Path to pre-trained checkpoint")
     parser.add_argument("--load_pretrained", action="store_true", help="Load pre-trained backbone weights from checkpoint")
@@ -465,7 +470,7 @@ def main():
     # ============================================================
     # 0. Initialize Experiment Logger
     # ============================================================
-    exp_logger = ExperimentLogger(log_dir=args.log_dir)
+    exp_logger = ExperimentLogger(log_dir=args.log_dir, naming_identifier=args.naming_identifier)
     print(f"Experiment: {exp_logger.run_name}")
     print(f"Log directory: {exp_logger.run_dir}")
     

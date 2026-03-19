@@ -1,0 +1,13 @@
+# Request resources
+request_gpus   = 1
+request_cpus   = 2
+request_memory = 16GB
+
+# Files
+executable = scripts/poc.sh
+output     = batchSubmissions/poc_$(Cluster)_$(Process)_$(UnixTime).out
+error      = batchSubmissions/poc_$(Cluster)_$(Process)_$(UnixTime).err
+log        = batchSubmissions/poc_$(Cluster)_$(UnixTime).log
+
+# Queue job
+queue

@@ -13,7 +13,7 @@ cd $HOME/AnomalyDetection
 apptainer exec --nv $IMG bash -c "
     source /opt/conda/bin/activate
     cd \"$HOME/AnomalyDetection\"
-    python -m src.poc_expts.expt_batching_aachen --gpu_id 0 --jet_name both --merge_strategy concat --naming_identifier poc_baseline_aachen --guaranteed_signal_per_batch 0 --use_wandb
+    python -m src.poc_expts.expt_batching_aachen --gpu_id 0 --jet_name both --merge_strategy concat --naming_identifier poc_batch2_aachen --guaranteed_signal_per_batch 2 --use_wandb
     "
 
 echo "Job finished."

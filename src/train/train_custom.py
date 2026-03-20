@@ -722,39 +722,39 @@ def main():
     # # Setup callbacks
     # checkpoint_callback = ModelCheckpoint(
     #     dirpath=exp_logger.get_checkpoint_dir(),
-    #     filename="epoch_{epoch:02d}_{val_loss:.4f}",
+    #     filename="{epoch:02d}_{val_loss:.4f}",
     #     monitor="val_loss",
     #     mode="min",
-    #     save_top_k=3,
+    #     save_top_k=1,
     #     save_last=False
     # )
 
     # Alternatively, monitor AUC instead of loss
     # checkpoint_callback = ModelCheckpoint(
     #     dirpath=exp_logger.get_checkpoint_dir(),
-    #     filename="epoch_{epoch:02d}_{val_loss:.4f}",
+    #     filename="{epoch:02d}_{val_loss:.4f}",
     #     monitor="val_loss",
     #     mode="min",
-    #     save_top_k=3,
+    #     save_top_k=1,
     #     save_last=False,
     # )
 
     # Or using ARGOS metric
     checkpoint_callback = ModelCheckpoint(
         dirpath=exp_logger.get_checkpoint_dir(),
-        filename="epoch_{epoch:02d}_{val_argos:.4f}",
+        filename="{epoch:02d}_{val_argos:.4f}",
         monitor="val_argos",
         mode="max",
-        save_top_k=3,
+        save_top_k=1,
         save_last=False,
     )
     
-    # Early stopping disabled
-    # early_stop_callback = EarlyStopping(
-    #     monitor="val_argos",
-    #     patience=5,
-    #     mode="max",  # Higher ARGOS is better
-    # )
+    # Early stopping enabled
+    early_stop_callback = EarlyStopping(
+        monitor="val_argos",
+        patience=30,
+        mode="max",  # Higher ARGOS is better
+    )
 
     # AUC callback: computes ROC AUC on validation set each epoch and logs it
     auc_callback = AUCCallback()
@@ -796,7 +796,7 @@ def main():
         accelerator="auto",
         devices=1,
         logger=loggers if loggers else False,
-        callbacks=[checkpoint_callback, auc_callback, argos_callback],  # early_stop_callback removed
+        callbacks=[checkpoint_callback, auc_callback, argos_callback, early_stop_callback],
         log_every_n_steps=20,
         gradient_clip_val=1,
         precision="32",

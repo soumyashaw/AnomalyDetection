@@ -1,0 +1,16 @@
+#!/bin/bash
+#SBATCH --job-name=train_custom
+#SBATCH --partition=c23g
+#SBATCH --time=04:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=16G
+#SBATCH --gres=gpu:1
+#SBATCH --output=batchSubmissions/train_custom_%j.out
+#SBATCH --error=batchSubmissions/train_custom_%j.err
+
+set -euo pipefail
+mkdir -p batchSubmissions
+
+bash scripts/train_custom.sh

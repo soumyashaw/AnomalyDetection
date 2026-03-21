@@ -1026,23 +1026,50 @@ def main():
     print("n_jets_train:", args.n_jets_train)
     print("Using Jet:", args.jet_name)
 
-    # Log data configuration
-    data_config = {
-        "dataset_path": args.dataset_path,
-        "signal_file": signal_path,
-        "supp_background_file": supp_background_path,
-        "background_file": background_path,
-        "n_jets_train": args.n_jets_train,
-        "batch_size": args.batch_size,
-        "max_sequence_len": 128,
-        "mom4_format": "epxpypz",
-        "train_val_split": args.train_val_split,
-        "features": list(input_features_dict.keys()),
-        "feature_preprocessing": input_features_dict,
-        "shuffle_train": True,
-        "jet_name": args.jet_name,
-        "guaranteed_signal_per_batch": args.guaranteed_signal_per_batch,
-    }
+    # Log data configuration (dependent on k value)
+    if args.guaranteed_signal_per_batch > 0:
+        # For k>0: All three files used with guaranteed signal injection
+        data_config = {
+            "experiment_type": "guaranteed_signal_injection",
+            "dataset_path": args.dataset_path,
+            "signal_file": signal_path,
+            "supp_background_file": supp_background_path,
+            "background_file": background_path,
+            "n_jets_train": args.n_jets_train,
+            "batch_size": args.batch_size,
+            "max_sequence_len": 128,
+            "mom4_format": "epxpypz",
+            "train_val_split": args.train_val_split,
+            "features": list(input_features_dict.keys()),
+            "feature_preprocessing": input_features_dict,
+            "shuffle_train": True,
+            "jet_name": args.jet_name,
+            "guaranteed_signal_per_batch": args.guaranteed_signal_per_batch,
+            "note": "All three files used. Signal injection is guaranteed in every batch.",
+        }
+    else:
+        # For k=0: Standard weak supervision baseline with all three files
+        # Label 0: Clean QCD (200k jets)
+        # Label 1: Mixed (25k real signal + 100k mislabeled suppressed QCD = 125k total)
+        # Signal fraction in Label 1: 25k / 125k ≈ 20% (not 1% due to file sizes)
+        data_config = {
+            "experiment_type": "weak_supervision_baseline",
+            "dataset_path": args.dataset_path,
+            "signal_file": signal_path,
+            "supp_background_file": supp_background_path,
+            "background_file": background_path,
+            "n_jets_train": args.n_jets_train,
+            "batch_size": args.batch_size,
+            "max_sequence_len": 128,
+            "mom4_format": "epxpypz",
+            "train_val_split": args.train_val_split,
+            "features": list(input_features_dict.keys()),
+            "feature_preprocessing": input_features_dict,
+            "shuffle_train": True,
+            "jet_name": args.jet_name,
+            "guaranteed_signal_per_batch": args.guaranteed_signal_per_batch,
+            "note": "Standard weak supervision (all three files). Baseline for k=1-4 ablation.",
+        }
     
     # Load data using appropriate loader
     if args.guaranteed_signal_per_batch > 0:
@@ -1075,13 +1102,28 @@ def main():
             num_workers=1,
         )
     else:
-        # Use standard weak supervision loader
+        # k=0: Standard weak supervision baseline (all three files)
+        # Label 0: Clean QCD background (bg_200k_SR_train.h5)
+        # Label 1: Mixed weak labels (signal + suppressed QCD)
+        # This is the baseline for comparison with k=1,2,3,4 guaranteed signal experiments
+        print(f"\n{'='*80}")
+        print(f"WEAK SUPERVISION BASELINE (k=0)")
+        print(f"{'='*80}")
+        print(f"Label 0: Clean QCD background ({args.n_jets_train[2]} jets)")
+        print(f"Label 1: Mixed weak labels (")
+        print(f"          {args.n_jets_train[0]} real signal jets +")
+        print(f"          {args.n_jets_train[1]} mislabeled suppressed QCD)")
+        print(f"Total Label 1: {args.n_jets_train[0] + args.n_jets_train[1]} jets")
+        print(f"Signal fraction in Label 1: {args.n_jets_train[0] / (args.n_jets_train[0] + args.n_jets_train[1]):.1%}")
+        print(f"This is the baseline for k=1,2,3,4 ablation studies.")
+        print(f"{'='*80}\n")
+        
         train_loader, val_loader = create_custom_lhco_h5_dataloaders(
-            h5_files_train=h5_files_all,
+            h5_files_train=h5_files_all,  # All three files: signal, supp_bg, clean_bg
             h5_files_val=None,
             feature_dict=input_features_dict,
             batch_size=args.batch_size,
-            n_jets_train=args.n_jets_train,  # [signal, background]
+            n_jets_train=args.n_jets_train,  # [signal, supp_bg, clean_bg]
             max_sequence_len=128,
             mom4_format="epxpypz",
             jet_name=args.jet_name,
@@ -1313,19 +1355,19 @@ def main():
     # Or using ARGOS metric
     checkpoint_callback = ModelCheckpoint(
         dirpath=exp_logger.get_checkpoint_dir(),
-        filename="epoch_{epoch:02d}_{val_argos:.4f}",
+        filename="{epoch:02d}_{val_argos:.4f}",
         monitor="val_argos",
         mode="max",
-        save_top_k=3,
+        save_top_k=1,
         save_last=False,
     )
     
-    # Early stopping disabled
-    # early_stop_callback = EarlyStopping(
-    #     monitor="val_argos",
-    #     patience=5,
-    #     mode="max",
-    # )
+    # Early stopping enabled
+    early_stop_callback = EarlyStopping(
+        monitor="val_argos",
+        patience=30,
+        mode="max",
+    )
 
     # AUC callback: computes ROC AUC on validation set each epoch and logs it
     auc_callback = AUCCallback()
@@ -1370,7 +1412,7 @@ def main():
         accelerator="gpu",
         devices=[args.gpu_id],
         logger=loggers if loggers else False,
-        callbacks=[checkpoint_callback, auc_callback, argos_callback],  # early_stop_callback removed
+        callbacks=[checkpoint_callback, auc_callback, argos_callback, early_stop_callback],
         log_every_n_steps=20,
         gradient_clip_val=1,
         precision="32",

@@ -74,154 +74,219 @@ from gabbro.data.loading import load_lhco_jets_from_h5, load_multiple_h5_files
 load_dotenv()  # Load environment variables from .env file (for W&B API key, etc.)
 
 
-def analyze_label1_composition(signal_path, supp_bg_path, n_signal, n_supp_bg, n_trials=100):
+class CurriculumSplitter:
     """
-    Analyze the composition of Label 1 (real signal + suppressed background) 
-    across random splits.
+    Manages curriculum learning label reassignments across 3 phases.
     
-    When we randomly divide Label 1 into two groups, what fraction of REAL 
-    signal ends up in each group? This tells us about the statistical variability
-    in signal distribution when we randomly split the weak labels.
+    Phase 1 (Epoch 0-9): Contaminated-only split
+      - Label 0 = Half of contaminated (Label 1)
+      - Label 1 = Other half of contaminated
     
-    Parameters
-    ----------
-    signal_path : str
-        Path to signal H5 file
-    supp_bg_path : str
-        Path to suppressed background H5 file
-    n_signal : int
-        Number of real signal jets
-    n_supp_bg : int
-        Number of suppressed background jets
-    n_trials : int
-        Number of random splits to test (default: 100)
-        
-    Returns
-    -------
-    dict
-        Statistics on signal distribution across random splits
+    Phase 2 (Epoch 10-100): Gradual restoration
+      - Pure background gradually returns to Label 0
+      - Contaminated from new Label 0 gradually returns to Label 1
+    
+    Phase 3 (Epoch 100+): Back to original
+      - Label 0 = pure background
+      - Label 1 = all contaminated
     """
-    from gabbro.data.loading import load_lhco_jets_from_h5
     
-    print(f"\n{'='*80}")
-    print(f"ANALYZING LABEL 1 COMPOSITION")
-    print(f"{'='*80}\n")
-    
-    # Create index arrays representing Label 1
-    signal_indices = np.arange(n_signal)
-    supp_bg_indices = np.arange(n_signal, n_signal + n_supp_bg)
-    
-    # Combine into single Label 1 pool
-    label1_indices = np.concatenate([signal_indices, supp_bg_indices])
-    total_label1 = len(label1_indices)
-    
-    print(f"Label 1 Composition:")
-    print(f"  Real signal jets: {n_signal}")
-    print(f"  Suppressed background (fake signal): {n_supp_bg}")
-    print(f"  Total Label 1 jets: {total_label1}")
-    print(f"\nPerforming {n_trials} random splits...\n")
-    
-    # Track signal distribution across random splits
-    signal_in_group1 = []  # Fraction of real signals in first group
-    signal_in_group2 = []  # Fraction of real signals in second group
-    
-    split_size = total_label1 // 2
-    
-    for trial in range(n_trials):
-        # Randomly shuffle Label 1 pool
-        shuffled_indices = np.random.permutation(label1_indices)
+    def __init__(self, n_real_signal, n_supp_bg, n_pure_bg, seed=42):
+        """
+        Parameters
+        ----------
+        n_real_signal : int
+            Number of real signal jets in Label 1
+        n_supp_bg : int
+            Number of suppressed (fake signal) background jets in Label 1
+        n_pure_bg : int
+            Number of pure background jets in original Label 0
+        seed : int
+            Random seed for reproducible split
+        """
+        np.random.seed(seed)
         
-        # Split into two groups
-        group1 = shuffled_indices[:split_size]
-        group2 = shuffled_indices[split_size:]
+        self.n_real_signal = n_real_signal
+        self.n_supp_bg = n_supp_bg
+        self.n_pure_bg = n_pure_bg
+        self.total_contaminated = n_real_signal + n_supp_bg
         
-        # Count real signals in each group
-        real_signal_in_g1 = np.sum(group1 < n_signal)
-        real_signal_in_g2 = np.sum(group2 < n_signal)
+        # Create index pools
+        contaminated_indices = np.arange(self.total_contaminated)
+        np.random.shuffle(contaminated_indices)
         
-        # Calculate fractions
-        frac_g1 = real_signal_in_g1 / split_size
-        frac_g2 = real_signal_in_g2 / split_size
+        # Split contaminated in half for Phase 1
+        split_point = self.total_contaminated // 2
+        self.contaminated_half_a = contaminated_indices[:split_point]
+        self.contaminated_half_b = contaminated_indices[split_point:]
         
-        signal_in_group1.append(frac_g1)
-        signal_in_group2.append(frac_g2)
-    
-    # Compute statistics
-    signal_in_group1 = np.array(signal_in_group1)
-    signal_in_group2 = np.array(signal_in_group2)
-    
-    results = {
-        "total_trials": n_trials,
-        "group_size": split_size,
-        "total_label1": total_label1,
-        "n_real_signal": n_signal,
-        "n_fake_signal": n_supp_bg,
+        self.pure_bg_indices = np.arange(self.total_contaminated, 
+                                        self.total_contaminated + n_pure_bg)
         
-        "group1_signal_fraction": {
-            "mean": float(np.mean(signal_in_group1)),
-            "std": float(np.std(signal_in_group1)),
-            "min": float(np.min(signal_in_group1)),
-            "max": float(np.max(signal_in_group1)),
-            "percentile_5": float(np.percentile(signal_in_group1, 5)),
-            "percentile_25": float(np.percentile(signal_in_group1, 25)),
-            "percentile_50": float(np.percentile(signal_in_group1, 50)),
-            "percentile_75": float(np.percentile(signal_in_group1, 75)),
-            "percentile_95": float(np.percentile(signal_in_group1, 95)),
-        },
+        self.current_epoch = 0
+        self.epoch_log = []
         
-        "group2_signal_fraction": {
-            "mean": float(np.mean(signal_in_group2)),
-            "std": float(np.std(signal_in_group2)),
-            "min": float(np.min(signal_in_group2)),
-            "max": float(np.max(signal_in_group2)),
-            "percentile_5": float(np.percentile(signal_in_group2, 5)),
-            "percentile_25": float(np.percentile(signal_in_group2, 25)),
-            "percentile_50": float(np.percentile(signal_in_group2, 50)),
-            "percentile_75": float(np.percentile(signal_in_group2, 75)),
-            "percentile_95": float(np.percentile(signal_in_group2, 95)),
-        },
-    }
+        print(f"\n{'='*80}")
+        print(f"CURRICULUM LEARNING SETUP")
+        print(f"{'='*80}")
+        print(f"Contaminated pool (signal + fake): {self.total_contaminated} jets")
+        print(f"  - Phase 1 split A: {len(self.contaminated_half_a)} jets")
+        print(f"  - Phase 1 split B: {len(self.contaminated_half_b)} jets")
+        print(f"Pure background pool: {n_pure_bg} jets")
+        print(f"\nPhase 1 (Epoch 0-9): Contaminated-only split")
+        print(f"Phase 2 (Epoch 10-100): Gradual restoration")
+        print(f"Phase 3 (Epoch 100+): Back to original labels")
+        print(f"{'='*80}\n")
     
-    # Print results
-    print(f"{'='*80}")
-    print(f"RESULTS: Random Split Analysis of Real Signals in Label 1")
-    print(f"{'='*80}\n")
+    def get_labels_for_epoch(self, epoch):
+        """
+        Returns label assignments for all samples at a given epoch.
+        
+        Parameters
+        ----------
+        epoch : int
+            Current training epoch
+        
+        Returns
+        -------
+        dict with keys:
+          - 'label_0': Array of indices assigned to Label 0
+          - 'label_1': Array of indices assigned to Label 1
+          - 'phase': Current phase (1, 2, or 3)
+          - 'progress': Progress through Phase 2 (0 to 1)
+        """
+        self.current_epoch = epoch
+        
+        if epoch < 10:
+            # Phase 1: Contaminated-only split
+            label_0 = self.contaminated_half_a.copy()
+            label_1 = self.contaminated_half_b.copy()
+            phase = 1
+            progress = 0.0
+        
+        elif epoch <= 100:
+            # Phase 2: Gradual restoration
+            progress = (epoch - 10) / 90.0  # Linear: 0->1
+            
+            # Pure background gradually returns to Label 0
+            n_pure_to_label0 = int(self.n_pure_bg * progress)
+            pure_to_label0 = self.pure_bg_indices[:n_pure_to_label0]
+            
+            # Remaining pure background (if any) stays in Label 1
+            pure_remaining = self.pure_bg_indices[n_pure_to_label0:]
+            
+            # Contaminated half A: gradually transitions from Label 0 to Label 1
+            n_half_a_to_label1 = int(len(self.contaminated_half_a) * progress)
+            half_a_to_label1 = self.contaminated_half_a[:n_half_a_to_label1]
+            half_a_to_label0 = self.contaminated_half_a[n_half_a_to_label1:]
+            
+            label_0 = np.concatenate([half_a_to_label0, pure_to_label0])
+            label_1 = np.concatenate([half_a_to_label1, self.contaminated_half_b, pure_remaining])
+            
+            phase = 2
+        
+        else:
+            # Phase 3: Back to original
+            label_0 = np.concatenate([self.pure_bg_indices])
+            label_1 = np.concatenate([self.contaminated_half_a, self.contaminated_half_b])
+            phase = 3
+            progress = 1.0
+        
+        result = {
+            'label_0': label_0,
+            'label_1': label_1,
+            'phase': phase,
+            'progress': progress,
+            'n_label_0': len(label_0),
+            'n_label_1': len(label_1),
+        }
+        
+        # Log for analysis
+        self.epoch_log.append({
+            'epoch': epoch,
+            'phase': phase,
+            'progress': progress,
+            'n_label_0': len(label_0),
+            'n_label_1': len(label_1),
+        })
+        
+        return result
     
-    print(f"Each random split divides {total_label1} Label-1 jets into two groups of {split_size} each")
+    def print_status(self, epoch):
+        """Print curriculum status at current epoch."""
+        result = self.get_labels_for_epoch(epoch)
+        print(f"Epoch {epoch:3d} | Phase {result['phase']} | Progress: {result['progress']:.2%} | "
+              f"Label 0: {result['n_label_0']:5d} | Label 1: {result['n_label_1']:5d}")
     
-    print(f"\n┌─ GROUP 1 Real Signal Fraction ──────────────────────────┐")
-    print(f"│ Mean:  {results['group1_signal_fraction']['mean']:.4f} (≈ {results['group1_signal_fraction']['mean']*split_size:.1f} real signals)")
-    print(f"│ Std:   {results['group1_signal_fraction']['std']:.4f}")
-    print(f"│ Range: {results['group1_signal_fraction']['min']:.4f} - {results['group1_signal_fraction']['max']:.4f}")
-    print(f"│ ")
-    print(f"│ Percentiles:")
-    print(f"│   5th: {results['group1_signal_fraction']['percentile_5']:.4f}")
-    print(f"│  25th: {results['group1_signal_fraction']['percentile_25']:.4f}")
-    print(f"│  50th: {results['group1_signal_fraction']['percentile_50']:.4f}")
-    print(f"│  75th: {results['group1_signal_fraction']['percentile_75']:.4f}")
-    print(f"│  95th: {results['group1_signal_fraction']['percentile_95']:.4f}")
-    print(f"└─────────────────────────────────────────────────────────┘\n")
+    def save_log(self, filepath):
+        """Save epoch log to JSON."""
+        with open(filepath, 'w') as f:
+            json.dump(self.epoch_log, f, indent=2)
+
+
+class CurriculumBatchSampler(torch.utils.data.Sampler):
+    """
+    Sampler that dynamically assigns labels based on curriculum epoch.
+    """
     
-    print(f"┌─ GROUP 2 Real Signal Fraction ──────────────────────────┐")
-    print(f"│ Mean:  {results['group2_signal_fraction']['mean']:.4f} (≈ {results['group2_signal_fraction']['mean']*split_size:.1f} real signals)")
-    print(f"│ Std:   {results['group2_signal_fraction']['std']:.4f}")
-    print(f"│ Range: {results['group2_signal_fraction']['min']:.4f} - {results['group2_signal_fraction']['max']:.4f}")
-    print(f"│ ")
-    print(f"│ Percentiles:")
-    print(f"│   5th: {results['group2_signal_fraction']['percentile_5']:.4f}")
-    print(f"│  25th: {results['group2_signal_fraction']['percentile_25']:.4f}")
-    print(f"│  50th: {results['group2_signal_fraction']['percentile_50']:.4f}")
-    print(f"│  75th: {results['group2_signal_fraction']['percentile_75']:.4f}")
-    print(f"│  95th: {results['group2_signal_fraction']['percentile_95']:.4f}")
-    print(f"└─────────────────────────────────────────────────────────┘\n")
+    def __init__(self, splitter, dataset_size, batch_size, shuffle=True):
+        """
+        Parameters
+        ----------
+        splitter : CurriculumSplitter
+            Curriculum scheduler
+        dataset_size : int
+            Total number of samples in dataset
+        batch_size : int
+            Batch size
+        shuffle : bool
+            Whether to shuffle within epoch
+        """
+        self.splitter = splitter
+        self.dataset_size = dataset_size
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.current_epoch = 0
     
-    print(f"INTERPRETATION:")
-    print(f"  • If distributions are symmetric: random split distributes signals evenly")
-    print(f"  • Expected mean: {n_signal / total_label1:.4f} (uniform distribution)")
-    print(f"  • Actual mean difference from expected: {abs(results['group1_signal_fraction']['mean'] - n_signal/total_label1):.4f}")
-    print(f"\n{'='*80}\n")
+    def set_epoch(self, epoch):
+        """Update epoch for curriculum progression."""
+        self.current_epoch = epoch
     
-    return results
+    def __iter__(self):
+        """Generate indices for current epoch with curriculum labels."""
+        # Get curriculum label assignment for this epoch
+        curriculum = self.splitter.get_labels_for_epoch(self.current_epoch)
+        indices = np.concatenate([curriculum['label_0'], curriculum['label_1']])
+        
+        if self.shuffle:
+            np.random.shuffle(indices)
+        
+        return iter(indices)
+    
+    def __len__(self):
+        return self.dataset_size
+
+
+class CurriculumCallback(Callback):
+    """
+    PyTorch Lightning callback to manage curriculum progression.
+    """
+    
+    def __init__(self, splitter, verbose=True):
+        super().__init__()
+        self.splitter = splitter
+        self.verbose = verbose
+    
+    def on_train_epoch_start(self, trainer, pl_module):
+        """Update sampler and print status at epoch start."""
+        epoch = trainer.current_epoch
+        
+        # Update sampler
+        if hasattr(trainer.train_dataloader.sampler, 'set_epoch'):
+            trainer.train_dataloader.sampler.set_epoch(epoch)
+        
+        if self.verbose and epoch % 5 == 0:
+            self.splitter.print_status(epoch)
 
 
 def main():
@@ -283,25 +348,24 @@ def main():
         num_workers=1,
     )
     
+    # ============================================================
+    # 3. Curriculum Learning Setup
+    # ============================================================
     # n_jets_train = [signal_real, supp_bg_labeled_as_signal, background_real]
-    # Actual label distribution after loading:
-    #   - Label 1: signal_real + supp_bg_labeled_as_signal  
-    #   - Label 0: background_real
-    n_label_1 = args.n_jets_train[0] + args.n_jets_train[1]  # signal + supp background
-    n_label_0 = args.n_jets_train[2]  # clean background
-    total = n_label_1 + n_label_0
+    n_real_signal = args.n_jets_train[0]
+    n_supp_bg = args.n_jets_train[1]
+    n_pure_bg = args.n_jets_train[2]
     
-    # Analyze the composition of Label 1 across random splits
-    print(f"\n{'='*80}")
-    print(f"DATA LOADING COMPLETE - ANALYZING LABEL 1 COMPOSITION")
-    print(f"{'='*80}")
-    label1_analysis = analyze_label1_composition(
-        signal_path=signal_path,
-        supp_bg_path=supp_background_path,
-        n_signal=args.n_jets_train[0],
-        n_supp_bg=args.n_jets_train[1],
-        n_trials=100
+    # Initialize curriculum scheduler
+    curriculum_splitter = CurriculumSplitter(
+        n_real_signal=n_real_signal,
+        n_supp_bg=n_supp_bg,
+        n_pure_bg=n_pure_bg,
+        seed=args.seed
     )
+    
+    # Add curriculum progress callback
+    curriculum_callback = CurriculumCallback(curriculum_splitter, verbose=True)
 
 
 if __name__ == "__main__":

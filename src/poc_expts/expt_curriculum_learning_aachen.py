@@ -70,6 +70,7 @@ from gabbro.utils.arrays import ak_pad
 from gabbro.data.data_utils import create_custom_lhco_h5_dataloaders
 from gabbro.models.backbone import BackboneClassificationLightning, BackboneDijetClassificationLightning, BackboneAachenClassificationLightning
 from gabbro.data.loading import load_lhco_jets_from_h5, load_multiple_h5_files
+from src.train.train_custom_aachen import ExperimentLogger, AUCCallback, ARGOSCallback
 
 load_dotenv()  # Load environment variables from .env file (for W&B API key, etc.)
 
@@ -366,6 +367,319 @@ def main():
     
     # Add curriculum progress callback
     curriculum_callback = CurriculumCallback(curriculum_splitter, verbose=True)
+
+    # ============================================================
+    # 4. Initialize Experiment Logger
+    # ============================================================
+    exp_logger = ExperimentLogger(log_dir=args.log_dir, naming_identifier=f"_curriculum_learning")
+    print(f"Experiment: {exp_logger.run_name}")
+    print(f"Log directory: {exp_logger.run_dir}")
+
+    # ============================================================
+    # 5. Set Random Seed
+    # ============================================================
+    L.seed_everything(args.seed)
+
+    device = torch.device(f'cuda:{args.gpu_id}' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+
+    # ============================================================
+    # 6. Create Model
+    # ============================================================
+    
+    # Calculate class weights for imbalanced dataset
+    model_kwargs = {
+        # Feature specification
+        "particle_features_dict": input_features_dict,
+        
+        # Architecture
+        "embedding_dim": args.embedding_dim,
+        "max_sequence_len": 128,
+        "n_out_nodes": 2,  # Binary classification (signal vs background)
+        
+        "embed_cfg": OmegaConf.create({
+            "type": "continuous_project_add",
+            "intermediate_dim": None,
+        }),
+        
+        # Transformer configuration (matching pre-trained checkpoint)
+        "transformer_cfg": OmegaConf.create({
+            "dim": args.embedding_dim,  # Must match embedding_dim
+            "n_blocks": 8,
+            "norm_after_blocks": True,
+            "residual_cfg": {
+                "gate_type": "local",
+                "init_value": 1,
+            },
+            "attn_cfg": {
+                "num_heads": 8,
+                "dropout_rate": 0.1,
+                "norm_before": True,
+                "norm_after": False,
+            },
+            "mlp_cfg": {
+                "dropout_rate": 0.0,
+                "norm_before": True,
+                "expansion_factor": 4,
+                "activation": "GELU",
+            },
+        }),
+        
+        # Anomaly detection head settings (for Aachen method)
+        "class_head_hidden_dim": 128,
+        "class_head_num_heads": 2,
+        "class_head_num_CA_blocks": 2,
+        "class_head_num_SA_blocks": 0,
+        "class_head_dropout_rate": 0.1,
+        
+        # Jet-level features
+        "jet_features_input_dim": 0,
+        
+        # Other settings
+        "apply_causal_mask": False,
+        "zero_padded_start_particle": False,
+    }
+    
+    if args.use_class_weights:
+        # For weak supervision: Calculate weights based on ACTUAL label distribution
+        # n_jets_train = [signal_real, supp_bg_labeled_as_signal, background_real]
+        # Actual label distribution after loading:
+        #   - Label 1: signal_real + supp_bg_labeled_as_signal  
+        #   - Label 0: background_real
+        n_label_1 = args.n_jets_train[0] + args.n_jets_train[1]  # signal + supp background
+        n_label_0 = args.n_jets_train[2]  # clean background
+        total = n_label_1 + n_label_0
+        
+        # Weight = total / (n_classes * n_samples_per_class)
+        # Higher weight for minority class
+        weight_label_0 = total / (2.0 * n_label_0)  # Weight for class 0 (clean background)
+        weight_label_1 = total / (2.0 * n_label_1)  # Weight for class 1 (signal + polluted)
+        class_weights = [weight_label_0, weight_label_1]
+        
+        print(f"\n=== Weak Supervision Label Distribution ===")
+        print(f"Label 0 (clean background): {n_label_0} jets → weight={weight_label_0:.4f}")
+        print(f"Label 1 (signal + polluted bg): {n_label_1} jets → weight={weight_label_1:.4f}")
+        print(f"  - True signal: {args.n_jets_train[0]}")
+        print(f"  - Polluted background: {args.n_jets_train[1]}")
+        print(f"Weight ratio (Label_1/Label_0): {weight_label_1/weight_label_0:.4f}")
+        print(f"Class weights array: {class_weights}\n")
+        model_kwargs["class_weights"] = class_weights
+    else:
+        print("Class weighting disabled - using standard CrossEntropyLoss")
+        model_kwargs["class_weights"] = None
+
+    # For constant learning rate, use ConstantLR
+    scheduler_with_params = torch.optim.lr_scheduler.ConstantLR
+
+    # Initialize the Aachen model
+    model = BackboneAachenClassificationLightning(
+        optimizer=torch.optim.AdamW,
+        optimizer_kwargs={
+            "lr": args.learning_rate,
+            "weight_decay": 1e-2,
+        },
+        scheduler=scheduler_with_params,
+        merge_strategy=args.merge_strategy,  # options: "concat", "average", "weighted_sum", "attention"
+        model_kwargs=model_kwargs,
+        use_continuous_input=True,
+        scheduler_lightning_kwargs={
+            "monitor": "val_argos",
+            "mode": "max",
+            "interval": "step",
+            "frequency": 1,
+        },
+    )
+
+    num_params = sum(p.numel() for p in model.parameters())
+    print(f"Model created with {num_params:,} parameters")
+    
+    # ============================================================
+    # 7. Log Configurations
+    # ============================================================
+    
+    # Log data configuration
+    data_config = {
+        "dataset_path": args.dataset_path,
+        "signal_file": signal_path,
+        "supp_background_file": supp_background_path,
+        "background_file": background_path,
+        "n_jets_train": args.n_jets_train,
+        "batch_size": args.batch_size,
+        "max_sequence_len": 128,
+        "mom4_format": "epxpypz",
+        "train_val_split": args.train_val_split,
+        "features": list(input_features_dict.keys()),
+        "feature_preprocessing": input_features_dict,
+        "shuffle_train": True,
+        "jet_name": args.jet_name,
+    }
+    
+    # Log model configuration
+    model_config = {
+        "architecture": "BackboneAachenClassificationLightning",
+        "class_head_type": "aachen",
+        "merge_strategy": args.merge_strategy,
+        "use_continuous_input": True,
+        "num_parameters": num_params,
+        "embedding_dim": args.embedding_dim,
+        "n_transformer_blocks": 8,
+        "num_attention_heads": 8,
+        "max_sequence_len": 128,
+        "n_output_classes": 2,
+        "model_kwargs": {k: v for k, v in model_kwargs.items() if k != "particle_features_dict"},
+    }
+    
+    # Log training configuration
+    training_config = {
+        "optimizer": "AdamW",
+        "optimizer_params": {
+            "lr": args.learning_rate,
+            "weight_decay": 1e-2,
+        },
+        "scheduler": "ConstantLR",
+        "max_steps": args.max_steps,
+        "gradient_clip_val": 1.0,
+        "precision": "32",
+        "early_stopping_patience": 15,
+        "early_stopping_monitor": "val_argos",
+        "checkpoint_monitor": "val_argos",
+        "checkpoint_mode": "max",
+        "use_class_weights": args.use_class_weights,
+        "class_weights": model_kwargs.get("class_weights", None),
+        "curriculum_learning": True,
+        "curriculum_phases": {
+            "phase_1": {"epochs": 10, "label_strategy": "contaminated"},
+            "phase_2": {"epochs": 91, "label_strategy": "gradual_restoration"},
+            "phase_3": {"epochs": "remaining", "label_strategy": "original"},
+        },
+    }
+    
+    # Log system configuration
+    system_config = {
+        "device": str(device),
+        "gpu_id": args.gpu_id,
+        "random_seed": args.seed,
+        "timestamp_start": datetime.now().isoformat(),
+    }
+    
+    # Combine all configs and log
+    full_config = {
+        "data": data_config,
+        "model": model_config,
+        "training": training_config,
+        "system": system_config,
+    }
+    exp_logger.log_config(full_config)
+    print(f"Configuration saved to: {exp_logger.run_dir / 'config.json'}")
+
+    # ============================================================
+    # 8. Setup Callbacks
+    # ============================================================
+    
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=exp_logger.get_checkpoint_dir(),
+        filename="{epoch:02d}_{val_argos:.4f}",
+        monitor="val_argos",
+        mode="max",
+        save_top_k=1,
+        save_last=False,
+    )
+    
+    # Early stopping enabled
+    early_stop_callback = EarlyStopping(
+        monitor="val_argos",
+        patience=100,
+        mode="max",
+    )
+
+    # AUC callback: computes ROC AUC on validation set each epoch and logs it
+    auc_callback = AUCCallback()
+
+    # ARGOS callback: computes ARGOS metric on validation set each epoch and logs it
+    argos_callback = ARGOSCallback()
+
+    # ============================================================
+    # 9. Setup W&B Logger
+    # ============================================================
+    
+    loggers = []
+    if args.use_wandb:
+        wandb_run_name = args.wandb_run_name if args.wandb_run_name else exp_logger.run_name
+        
+        wandb_logger = WandbLogger(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=wandb_run_name,
+            save_dir=str(exp_logger.run_dir),
+            config=full_config,
+            log_model=True,
+        )
+        loggers.append(wandb_logger)
+        
+        print(f"\n{'=' * 80}")
+        print(f"W&B logging enabled!")
+        print(f"  Project: {args.wandb_project}")
+        if args.wandb_entity:
+            print(f"  Entity: {args.wandb_entity}")
+        print(f"  Run name: {wandb_run_name}")
+        print(f"  Run URL: {wandb_logger.experiment.url}")
+        print(f"{'=' * 80}\n")
+    else:
+        print(f"\nW&B logging disabled. Use --use_wandb to enable.\n")
+        wandb_logger = None
+
+    # ============================================================
+    # 10. Create Trainer
+    # ============================================================
+    
+    print("Starting curriculum learning training...")
+    print(f"Max steps: {args.max_steps}")
+    print(f"Expected curriculum phases:")
+    print(f"  - Phase 1 (epochs 0-9): Contaminated suppressed background labels")
+    print(f"  - Phase 2 (epochs 10-100): Gradual restoration toward original signal")
+    print(f"  - Phase 3 (epochs 100+): Original signal labels")
+    print()
+    
+    trainer = L.Trainer(
+        max_steps=args.max_steps,
+        accelerator="gpu",
+        devices=[args.gpu_id],
+        logger=loggers if loggers else False,
+        callbacks=[checkpoint_callback, auc_callback, argos_callback, early_stop_callback, curriculum_callback],
+        log_every_n_steps=20,
+        gradient_clip_val=1,
+        precision="32",
+        num_nodes=1,
+    )
+
+    # ============================================================
+    # 11. Training Loop
+    # ============================================================
+    try:
+        trainer.fit(
+            model=model,
+            train_dataloaders=train_loader,
+            val_dataloaders=val_loader,
+        )
+        
+        # Log final results
+        exp_logger.log_final_results(trainer, checkpoint_callback)
+        
+        print("\n" + "=" * 80)
+        print("Curriculum learning training complete!")
+        print(f"Best checkpoint: {checkpoint_callback.best_model_path}")
+        print(f"Best validation ARGOS: {checkpoint_callback.best_model_score:.4f}")
+        print(f"Results saved to: {exp_logger.run_dir}")
+        if args.use_wandb:
+            print(f"W&B run: {wandb.run.url}")
+            wandb.finish()
+        print("=" * 80)
+        
+    except Exception as e:
+        print(f"\n❌ Training failed with error: {e}")
+        if args.use_wandb and wandb_logger:
+            wandb.finish(exit_code=1)
+        raise
 
 
 if __name__ == "__main__":

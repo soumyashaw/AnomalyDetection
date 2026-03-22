@@ -1,6 +1,0 @@
-{
-    "training_completed": false,
-    "error": "'ExperimentLogger' object has no attribute 'save_metrics'",
-    "error_type": "AttributeError",
-    "timestamp_error": "2026-02-17T07:47:23.097844"
-}

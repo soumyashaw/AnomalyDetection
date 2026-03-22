@@ -23,8 +23,7 @@
 [ ] Fix CV for CERN application
 
 Currently running:
-[✓] python train_custom_aachen.py --gpu_id 0 --seed 42 --jet_name both --merge_strategy concat --use_wandb (2000)
-[✓] python train_custom.py --gpu_id 0 --seed 42 --jet_name both --merge_strategy concat --use_wandb (2000)
-
+[ ] python gabbro/train.py 'experiment=[ example_experiment_multi_head , example_experiment_generative_jetclass ]'
+[ ] python gabbro/train.py 'experiment=[ example_experiment_multi_head , example_experiment_classification_jetclass ]'
 
 Next:

@@ -1362,12 +1362,12 @@ def main():
         save_last=False,
     )
     
-    # Early stopping enabled
-    early_stop_callback = EarlyStopping(
-        monitor="val_argos",
-        patience=30,
-        mode="max",
-    )
+    # Early stopping disabled
+    # early_stop_callback = EarlyStopping(
+    #     monitor="val_loss",
+    #     patience=30,
+    #     mode="min",
+    # )
 
     # AUC callback: computes ROC AUC on validation set each epoch and logs it
     auc_callback = AUCCallback()
@@ -1412,7 +1412,7 @@ def main():
         accelerator="gpu",
         devices=[args.gpu_id],
         logger=loggers if loggers else False,
-        callbacks=[checkpoint_callback, auc_callback, argos_callback, early_stop_callback],
+        callbacks=[checkpoint_callback, auc_callback, argos_callback], #early_stop_callback],
         log_every_n_steps=20,
         gradient_clip_val=1,
         precision="32",

@@ -1,0 +1,13 @@
+# Request resources
+request_gpus   = 1
+request_cpus   = 2
+request_memory = 16GB
+
+# Files
+executable = scripts/extract_verify_backbone.sh
+output     = batchSubmissions/extract_$(Cluster)_$(Process)_$(UnixTime).out
+error      = batchSubmissions/extract_$(Cluster)_$(Process)_$(UnixTime).err
+log        = batchSubmissions/extract_$(Cluster)_$(UnixTime).log
+
+# Queue job
+queue

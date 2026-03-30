@@ -549,7 +549,7 @@ def main():
     parser.add_argument("--accumulation_steps", type=int, default=1,
                        help="[ABLATION] Number of gradient accumulation steps. Effective batch = batch_size * accumulation_steps. "
                             "Run A (1x), Run B (4x), Run C (16x).")
-    parser.add_argument("--lr_scaling_rule", type=str, default="sqrt", choices=["sqrt", "linear", "none"],
+    parser.add_argument("--lr_scaling_rule", type=str, default="none", choices=["sqrt", "linear", "none"],
                        help="Learning rate scaling rule for gradient accumulation. "
                             "'sqrt' (default): LR' = LR * sqrt(accum_steps). "
                             "'linear': LR' = LR * accum_steps. "
@@ -880,12 +880,12 @@ def main():
         save_last=False,
     )
     
-    # Early stopping enabled
-    early_stop_callback = EarlyStopping(
-        monitor="val_argos",
-        patience=30,
-        mode="max",
-    )
+    # Early stopping disabled
+    # early_stop_callback = EarlyStopping(
+    #     monitor="val_loss",
+    #     patience=30,
+    #     mode="min",
+    # )
 
     # AUC callback: computes ROC AUC on validation set each epoch and logs it
     auc_callback = AUCCallback()
@@ -930,7 +930,7 @@ def main():
         accelerator="gpu",
         devices=[args.gpu_id],
         logger=loggers if loggers else False,
-        callbacks=[checkpoint_callback, auc_callback, argos_callback, early_stop_callback],
+        callbacks=[checkpoint_callback, auc_callback, argos_callback], #early_stop_callback],
         log_every_n_steps=20,
         gradient_clip_val=1,
         precision="32",

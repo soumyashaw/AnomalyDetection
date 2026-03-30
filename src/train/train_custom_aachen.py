@@ -54,6 +54,7 @@ import argparse
 import numpy as np
 import awkward as ak
 import lightning as L
+from collections.abc import Mapping
 from functools import partial
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, TensorDataset
@@ -69,9 +70,92 @@ import wandb
 from gabbro.utils.arrays import ak_pad
 from gabbro.data.data_utils import create_custom_lhco_h5_dataloaders
 from gabbro.models.backbone import BackboneClassificationLightning, BackboneDijetClassificationLightning, BackboneAachenClassificationLightning
+from gabbro.models.backbone_base import BackboneTransformer
 from gabbro.data.loading import load_lhco_jets_from_h5, load_multiple_h5_files
 
 load_dotenv()  # Load environment variables from .env file (for W&B API key, etc.)
+
+
+def _to_plain_dict(obj):
+    """Convert config-like containers (e.g., DictConfig) to plain dict recursively."""
+    if isinstance(obj, Mapping):
+        return {k: _to_plain_dict(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_to_plain_dict(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_to_plain_dict(v) for v in obj)
+    return obj
+
+
+class AttrDict(dict):
+    """Dict with attribute-style access (obj.key) while keeping dict behavior."""
+
+    def __getattr__(self, key):
+        try:
+            return self[key]
+        except KeyError as exc:
+            raise AttributeError(key) from exc
+
+    def __setattr__(self, key, value):
+        self[key] = value
+
+    def __delattr__(self, key):
+        try:
+            del self[key]
+        except KeyError as exc:
+            raise AttributeError(key) from exc
+
+
+def _to_attrdict(obj):
+    """Recursively convert mappings to AttrDict for cfg objects like embed_cfg."""
+    if isinstance(obj, Mapping):
+        return AttrDict({k: _to_attrdict(v) for k, v in obj.items()})
+    if isinstance(obj, list):
+        return [_to_attrdict(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_to_attrdict(v) for v in obj)
+    return obj
+
+
+def extract_pretrained_backbone_hparams(ckpt_path):
+    """Extract normalized backbone hyperparameters from a checkpoint.
+
+    Returns
+    -------
+    dict
+        Flattened backbone configuration dict, or empty dict if unavailable.
+    """
+    try:
+        ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=True)
+    except TypeError:
+        ckpt = torch.load(ckpt_path, map_location='cpu')
+
+    if not isinstance(ckpt, dict):
+        return {}
+
+    hparams = ckpt.get('hyper_parameters', {})
+    if not hparams:
+        hparams = ckpt.get('hparams', {})
+    if not hparams:
+        hparams = ckpt.get('hparams_dict', {})
+
+    if isinstance(hparams, Mapping):
+        hparams = _to_plain_dict(hparams)
+    else:
+        hparams = {}
+
+    if hparams and 'backbone_cfg' in hparams and 'embedding_dim' not in hparams:
+        if isinstance(hparams['backbone_cfg'], Mapping):
+            hparams = _to_plain_dict(hparams['backbone_cfg'])
+
+    if hparams and 'model_kwargs' in hparams and 'embedding_dim' not in hparams:
+        model_kwargs = hparams.get('model_kwargs', {})
+        if isinstance(model_kwargs, Mapping) and 'backbone_cfg' in model_kwargs:
+            hparams = _to_plain_dict(model_kwargs['backbone_cfg'])
+        elif isinstance(model_kwargs, Mapping) and 'embedding_dim' in model_kwargs:
+            hparams = _to_plain_dict(model_kwargs)
+
+    return hparams if isinstance(hparams, dict) else {}
 
 class ExperimentLogger:
     """Handles logging of experiment configuration and results."""
@@ -376,94 +460,198 @@ class ARGOSCallback(Callback):
 def load_pretrained_backbone(model, ckpt_path, strict=False):
     """Load pre-trained backbone weights from a checkpoint.
     
-    This function loads backbone weights from a pre-trained checkpoint with
-    flexible handling of dimension mismatches. Layers with compatible dimensions
-    are loaded, while incompatible layers (e.g., input projection due to different
-    feature counts) are initialized randomly.
+    This function loads backbone weights from a pre-trained checkpoint and loads them
+    into the model's BackboneTransformer. Handles both Lightning checkpoint format
+    (with 'state_dict' key) and raw state_dict formats. Removes 'backbone.' prefix
+    from keys if present.
     
     Parameters
     ----------
-    model : BackboneClassificationLightning
+    model : BackboneAachenClassificationLightning
         The model to load weights into
     ckpt_path : str
         Path to the checkpoint file
     strict : bool, optional
         Whether to strictly enforce that the keys in state_dict match (default: False)
         When False, allows partial loading with dimension mismatches
+    
+    Returns
+    -------
+    dict
+        Dictionary with loading diagnostics
     """
-    print(f"Loading checkpoint from: {ckpt_path}")
+    print(f"Loading pre-trained backbone weights from: {ckpt_path}")
     
-    # Load checkpoint
-    device = next(model.parameters()).device
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    # Load checkpoint. Prefer weights_only for safer deserialization when available.
+    try:
+        ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=True)
+    except TypeError:
+        ckpt = torch.load(ckpt_path, map_location='cpu')
     
-    # Extract state dict
-    if "state_dict" in ckpt:
-        state_dict = ckpt["state_dict"]
+    # Extract state_dict from checkpoint
+    if isinstance(ckpt, dict) and 'state_dict' in ckpt:
+        state_dict = ckpt['state_dict']
     else:
         state_dict = ckpt
+
+    # Recover checkpoint backbone hyperparameters (same approach as eval_backbone.py).
+    hparams = extract_pretrained_backbone_hparams(ckpt_path)
     
-    # Filter to only backbone weights
+    # Extract backbone state_dict and remove 'backbone.' prefix if present
     backbone_state_dict = {}
     for key, value in state_dict.items():
-        # Keep only backbone-related keys, skip head/classifier keys
-        if key.startswith("backbone."):
-            # Remove "backbone." prefix for loading into model.backbone
-            new_key = key.replace("backbone.", "")
+        if key.startswith('backbone.'):
+            new_key = key[len('backbone.'):]
             backbone_state_dict[new_key] = value
-        elif key.startswith("module."):
-            # Handle case where weights might be saved with "module." prefix
-            new_key = key.replace("module.", "")
-            if not new_key.startswith("head"):  # Skip head weights
-                backbone_state_dict[new_key] = value
+        elif not any(key.startswith(prefix) for prefix in ['class_head', 'head', 'embedding_projection', 
+                                                             'encoder_layer', 'cross_attn', 'fusion_proj']):
+            backbone_state_dict[key] = value
     
-    # Remove tril keys for backwards compatibility
-    backbone_state_dict = {k: v for k, v in backbone_state_dict.items() if ".tril" not in k}
-    
-    # Get current model state dict
-    current_state_dict = model.backbone.state_dict()
-    
-    # Filter out keys with dimension mismatches
-    compatible_state_dict = {}
-    incompatible_keys = []
-    
-    for key, value in backbone_state_dict.items():
-        if key in current_state_dict:
-            if current_state_dict[key].shape == value.shape:
-                compatible_state_dict[key] = value
-            else:
-                incompatible_keys.append(
-                    f"{key}: checkpoint shape {value.shape} vs model shape {current_state_dict[key].shape}"
+    if not backbone_state_dict:
+        backbone_state_dict = state_dict
+        print("Warning: No 'backbone.' prefix found. Using all keys from checkpoint.")
+
+    # Eval-style path: instantiate BackboneTransformer from checkpoint hparams,
+    # load checkpoint weights there, then swap it into the Lightning model.
+    if hparams and 'embedding_dim' in hparams:
+        try:
+            print("Instantiating BackboneTransformer with checkpoint hyperparameters...")
+            hparams_for_model = _to_attrdict(hparams)
+            ckpt_backbone = BackboneTransformer(**hparams_for_model)
+            ckpt_backbone.load_state_dict(backbone_state_dict, strict=strict)
+
+            # Ensure replaced backbone is compatible with training dataloader's jet feature shape.
+            current_jet_dim = getattr(model.backbone, "jet_features_input_dim", None)
+            ckpt_jet_dim = getattr(ckpt_backbone, "jet_features_input_dim", None)
+            if (
+                current_jet_dim is not None
+                and ckpt_jet_dim is not None
+                and current_jet_dim != ckpt_jet_dim
+            ):
+                print(
+                    f"Warning: Checkpoint backbone jet_features_input_dim ({ckpt_jet_dim}) "
+                    f"differs from current model ({current_jet_dim}). "
+                    "Skipping full backbone replacement and falling back to partial in-place loading."
                 )
-        else:
-            # Key exists in checkpoint but not in current model
-            incompatible_keys.append(f"{key}: not found in current model")
+                raise ValueError(
+                    f"Incompatible jet feature dims: checkpoint={ckpt_jet_dim}, current={current_jet_dim}"
+                )
+
+            model.backbone = ckpt_backbone
+            print("Successfully replaced model.backbone with checkpoint-configured backbone.")
+            return {
+                "mode": "replaced_backbone_from_hparams",
+                "missing_keys": [],
+                "unexpected_keys": [],
+                "skipped_missing_key": [],
+                "skipped_shape_mismatch": [],
+            }
+        except Exception as e:
+            print(
+                f"Warning: Could not rebuild backbone from checkpoint hyperparameters "
+                f"({type(e).__name__}: {e}). Falling back to partial in-place loading into current backbone."
+            )
     
-    print(f"\nLoading {len(compatible_state_dict)}/{len(backbone_state_dict)} compatible backbone parameters")
-    print(f"Sample compatible keys: {list(compatible_state_dict.keys())[:5]}")
-    
-    if incompatible_keys:
-        print(f"\n⚠️  Found {len(incompatible_keys)} incompatible parameters (will be randomly initialized):")
-        for key in incompatible_keys[:10]:
-            print(f"  - {key}")
-        if len(incompatible_keys) > 10:
-            print(f"  ... and {len(incompatible_keys) - 10} more")
-    
-    # Load the compatible weights
-    missing_keys, unexpected_keys = model.backbone.load_state_dict(compatible_state_dict, strict=False)
+    # Filter keys that do not exist in current backbone or have incompatible tensor shapes.
+    current_backbone_state = model.backbone.state_dict()
+    filtered_backbone_state = {}
+    skipped_missing_key = []
+    skipped_shape_mismatch = []
+
+    for key, value in backbone_state_dict.items():
+        if key not in current_backbone_state:
+            skipped_missing_key.append(key)
+            continue
+
+        if current_backbone_state[key].shape != value.shape:
+            skipped_shape_mismatch.append(
+                (key, tuple(value.shape), tuple(current_backbone_state[key].shape))
+            )
+            continue
+
+        filtered_backbone_state[key] = value
+
+    if skipped_missing_key:
+        print(
+            f"Warning: Skipping {len(skipped_missing_key)} pretrained backbone keys not present in current model."
+        )
+
+    if skipped_shape_mismatch:
+        print(
+            f"Warning: Skipping {len(skipped_shape_mismatch)} pretrained backbone keys due to shape mismatch."
+        )
+        for key, ckpt_shape, model_shape in skipped_shape_mismatch:
+            print(f"  Shape mismatch for '{key}': checkpoint {ckpt_shape} vs model {model_shape}")
+
+    # Keep strict only if explicitly requested and no incompatible keys were skipped.
+    effective_strict = strict and not skipped_missing_key and not skipped_shape_mismatch
+
+    # Load compatible subset into model.backbone
+    result = model.backbone.load_state_dict(filtered_backbone_state, strict=effective_strict)
+    missing_keys = result[0] if isinstance(result, tuple) else []
+    unexpected_keys = result[1] if isinstance(result, tuple) else []
     
     if missing_keys:
-        print(f"\n📝 Missing keys ({len(missing_keys)}) - these will remain randomly initialized:")
-        for key in missing_keys[:10]:
-            print(f"  - {key}")
-        if len(missing_keys) > 10:
-            print(f"  ... and {len(missing_keys) - 10} more")
+        msg = f"Missing keys in backbone checkpoint: {missing_keys}"
+        if effective_strict:
+            raise RuntimeError(msg)
+        else:
+            print(f"Warning: {msg}")
     
-    print("\n✓ Backbone weights loaded successfully!")
-    print("  - Transformer blocks: loaded from checkpoint")
-    print("  - Input/output projections: may be randomly initialized due to feature dimension differences")
-    print("  - Classification head: randomly initialized (2 classes for LHCO vs 10 classes in checkpoint)")
+    if unexpected_keys:
+        msg = f"Unexpected keys in backbone checkpoint: {unexpected_keys}"
+        print(f"Warning: {msg}")
+    
+    print(f"Successfully loaded backbone weights from: {ckpt_path}")
+    
+    return {
+        "mode": "partial_inplace_load",
+        "missing_keys": missing_keys,
+        "unexpected_keys": unexpected_keys,
+        "skipped_missing_key": skipped_missing_key,
+        "skipped_shape_mismatch": skipped_shape_mismatch,
+    }
 
+
+def load_backbone_weights(model, ckpt_path, strict=False):
+    """Wrapper function to load backbone weights.
+    
+    This is called from BackboneAachenClassificationLightning.on_train_start() hook.
+    
+    Parameters
+    ----------
+    model : BackboneAachenClassificationLightning
+        The Lightning module to load weights into
+    ckpt_path : str
+        Path to the checkpoint file
+    strict : bool, optional
+        Whether to strictly enforce that the keys match (default: False)
+    """
+    if ckpt_path is None or ckpt_path == "None":
+        print("No pre-trained backbone weights specified.")
+        return
+    
+    load_pretrained_backbone(model, ckpt_path, strict=strict)
+
+
+def set_backbone_requires_grad(model, requires_grad=True):
+    """Set requires_grad for all backbone parameters.
+    
+    Parameters
+    ----------
+    model : BackboneAachenClassificationLightning
+        The Lightning module containing the backbone
+    requires_grad : bool
+        Whether to compute gradients for backbone parameters (default: True)
+    """
+    num_params = 0
+    for param in model.backbone.parameters():
+        param.requires_grad = requires_grad
+        num_params += param.numel()
+    
+    status = "trainable" if requires_grad else "frozen"
+    print(f"Backbone set to {status}: {num_params:,} parameters")
+    return num_params
 
 
 
@@ -485,12 +673,17 @@ def main():
     parser.add_argument("--pretrained_ckpt", type=str, help="Path to pre-trained checkpoint")
     parser.add_argument("--load_pretrained", action="store_true", help="Load pre-trained backbone weights from checkpoint")
     parser.add_argument("--use_class_weights", type=lambda x: x.lower() == 'true', default=True, help="Use automatic class weighting for imbalanced data (default: True)")
+    parser.add_argument("--freeze_backbone", action="store_true", help="Freeze backbone weights during training (no gradient updates)")
+    parser.add_argument("--update_backbone", action="store_true", default=True, help="Update backbone weights during training (default: True, set to False with --freeze_backbone)")
 
     # W&B arguments
     parser.add_argument("--use_wandb", action="store_true", help="Enable Weights & Biases logging")
     parser.add_argument("--wandb_project", type=str, default="anomaly-detection-lhco", help="W&B project name")
     parser.add_argument("--wandb_entity", type=str, default=None, help="W&B entity/team name (optional)")
     parser.add_argument("--wandb_run_name", type=str, default=None, help="W&B run name (optional, auto-generated if not provided)")
+    
+    # HPC arguments
+    parser.add_argument("--use_hpc", action="store_true", help="Disable progress bar for HPC environments to avoid large log files")
     
     args = parser.parse_args()
 
@@ -564,8 +757,45 @@ def main():
     # 3. Create Model
     # ============================================================
 
-    # Calculate class weights for imbalanced dataset
+    # Build model config:
+    # - default: from current args
+    # - with pretrained checkpoint: keep backbone config from checkpoint hparams
     model_kwargs = create_model_config(input_features_dict, args)
+    model_config_source = "args"
+    pretrained_backbone_hparams = {}
+    if args.load_pretrained and args.pretrained_ckpt:
+        pretrained_backbone_hparams = extract_pretrained_backbone_hparams(args.pretrained_ckpt)
+        if pretrained_backbone_hparams and "embedding_dim" in pretrained_backbone_hparams:
+            backbone_override_keys = [
+                "particle_features_dict",
+                "embedding_dim",
+                "max_sequence_len",
+                "n_out_nodes",
+                "embed_cfg",
+                "transformer_cfg",
+                "jet_features_input_dim",
+                "apply_causal_mask",
+                "zero_padded_start_particle",
+            ]
+            overridden = []
+            for key in backbone_override_keys:
+                if key in pretrained_backbone_hparams:
+                    model_kwargs[key] = pretrained_backbone_hparams[key]
+                    overridden.append(key)
+
+            model_config_source = "pretrained_checkpoint_hparams"
+            print("Using backbone configuration from pretrained checkpoint.")
+            print(f"Overridden backbone keys: {overridden}")
+        else:
+            print(
+                "Warning: Could not extract usable backbone hyperparameters from checkpoint. "
+                "Falling back to args-based model config."
+            )
+
+    # BackboneTransformer expects cfg objects with attribute-style access (cfg.type, etc.).
+    for cfg_key in ["embed_cfg", "transformer_cfg"]:
+        if cfg_key in model_kwargs and isinstance(model_kwargs[cfg_key], Mapping):
+            model_kwargs[cfg_key] = _to_attrdict(model_kwargs[cfg_key])
     
     if args.use_class_weights:
         # For weak supervision: Calculate weights based on ACTUAL label distribution
@@ -678,8 +908,16 @@ def main():
     # Load pre-trained backbone weights if requested
     if args.load_pretrained and args.pretrained_ckpt:
         print(f"Loading pre-trained backbone weights from: {args.pretrained_ckpt}")
-        load_pretrained_backbone(model, args.pretrained_ckpt)
+        load_pretrained_backbone(model, args.pretrained_ckpt, strict=False)
         print("Successfully loaded pre-trained backbone weights!")
+    
+    # Freeze or update backbone based on arguments
+    if args.freeze_backbone:
+        set_backbone_requires_grad(model, requires_grad=False)
+        print("Backbone frozen - only classification head will be trained")
+    else:
+        set_backbone_requires_grad(model, requires_grad=True)
+        print("Backbone trainable - all parameters will be updated during training")
 
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model created with {num_params:,} parameters")
@@ -689,12 +927,14 @@ def main():
         "architecture": "BackboneAachenClassificationLightning",
         "class_head_type": "aachen", #"class_attention",
         "merge_strategy": args.merge_strategy,
+        "config_source": model_config_source,
         "use_continuous_input": True,
         "num_parameters": num_params,
-        "embedding_dim": args.embedding_dim,
+        "embedding_dim": model_kwargs.get("embedding_dim"),
         "n_transformer_blocks": 8,  # Updated to match pre-trained model
         "num_attention_heads": 8,
-        "max_sequence_len": 128,
+        "max_sequence_len": model_kwargs.get("max_sequence_len"),
+        "jet_features_input_dim": model_kwargs.get("jet_features_input_dim"),
         "n_output_classes": 2,
         "pretrained_checkpoint": args.pretrained_ckpt if args.load_pretrained else None,
         "load_pretrained": args.load_pretrained,
@@ -770,12 +1010,12 @@ def main():
         save_last=False,
     )
     
-    # Early stopping enabled
-    early_stop_callback = EarlyStopping(
-        monitor="val_argos",
-        patience=30,
-        mode="max",
-    )
+    # Early stopping disabled
+    # early_stop_callback = EarlyStopping(
+    #     monitor="val_argos",
+    #     patience=50,
+    #     mode="max",
+    # )
 
     # AUC callback: computes ROC AUC on validation set each epoch and logs it
     auc_callback = AUCCallback()
@@ -820,11 +1060,12 @@ def main():
         accelerator="gpu",
         devices=[args.gpu_id],
         logger=loggers if loggers else False,
-        callbacks=[checkpoint_callback, auc_callback, argos_callback, early_stop_callback],
+        callbacks=[checkpoint_callback, auc_callback, argos_callback], #early_stop_callback],
         log_every_n_steps=20,
         gradient_clip_val=1,
         precision="32",
         num_nodes=1,
+        enable_progress_bar=not args.use_hpc,
     )
 
     # ============================================================

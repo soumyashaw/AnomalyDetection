@@ -356,6 +356,121 @@ class ARGOSCallback(Callback):
         # Log the metric
         pl_module.log("val_argos", argos, prog_bar=True, logger=True)
 
+def load_pretrained_backbone(model, ckpt_path, strict=False):
+    """Load pre-trained backbone weights from a checkpoint.
+    
+    This function loads backbone weights from a pre-trained checkpoint and loads them
+    into the model's BackboneTransformer. Handles both Lightning checkpoint format
+    (with 'state_dict' key) and raw state_dict formats. Removes 'backbone.' prefix
+    from keys if present.
+    
+    Parameters
+    ----------
+    model : BackboneAachenClassificationLightning
+        The model to load weights into
+    ckpt_path : str
+        Path to the checkpoint file
+    strict : bool, optional
+        Whether to strictly enforce that the keys in state_dict match (default: False)
+        When False, allows partial loading with dimension mismatches
+    
+    Returns
+    -------
+    dict
+        Dictionary with 'missing_keys' and 'unexpected_keys' from the load operation
+    """
+    print(f"Loading pre-trained backbone weights from: {ckpt_path}")
+    
+    # Load checkpoint
+    ckpt = torch.load(ckpt_path, map_location='cpu')
+    
+    # Extract state_dict from checkpoint
+    if isinstance(ckpt, dict) and 'state_dict' in ckpt:
+        # Lightning checkpoint format
+        state_dict = ckpt['state_dict']
+    else:
+        # Raw state_dict or direct model state
+        state_dict = ckpt
+    
+    # Extract backbone state_dict and remove 'backbone.' prefix if present
+    backbone_state_dict = {}
+    for key, value in state_dict.items():
+        if key.startswith('backbone.'):
+            # Remove 'backbone.' prefix from Lightning checkpoint
+            new_key = key[len('backbone.'):]
+            backbone_state_dict[new_key] = value
+        elif not any(key.startswith(prefix) for prefix in ['class_head', 'head', 'embedding_projection', 
+                                                             'encoder_layer', 'cross_attn', 'fusion_proj']):
+            # Include keys that don't belong to the classification head
+            backbone_state_dict[key] = value
+    
+    if not backbone_state_dict:
+        # If no backbone-specific keys found, try using all keys (for pure backbone checkpoints)
+        backbone_state_dict = state_dict
+        print("Warning: No 'backbone.' prefix found. Using all keys from checkpoint.")
+    
+    # Load state_dict into model.backbone
+    result = model.backbone.load_state_dict(backbone_state_dict, strict=strict)
+    missing_keys = result[0] if isinstance(result, tuple) else []
+    unexpected_keys = result[1] if isinstance(result, tuple) else []
+    
+    if missing_keys:
+        msg = f"Missing keys in backbone checkpoint: {missing_keys}"
+        if strict:
+            logger.error(msg)
+            raise RuntimeError(msg)
+        else:
+            logger.warning(msg)
+    
+    if unexpected_keys:
+        msg = f"Unexpected keys in backbone checkpoint: {unexpected_keys}"
+        logger.warning(msg)
+    
+    print(f"Successfully loaded backbone weights from: {ckpt_path}")
+    
+    return {"missing_keys": missing_keys, "unexpected_keys": unexpected_keys}
+
+
+def load_backbone_weights(model, ckpt_path, strict=False):
+    """Wrapper function to load backbone weights.
+    
+    This is called from BackboneAachenClassificationLightning.on_train_start() hook.
+    
+    Parameters
+    ----------
+    model : BackboneAachenClassificationLightning
+        The Lightning module to load weights into
+    ckpt_path : str
+        Path to the checkpoint file
+    strict : bool, optional
+        Whether to strictly enforce that the keys match (default: False)
+    """
+    if ckpt_path is None or ckpt_path == "None":
+        logger.info("No pre-trained backbone weights specified.")
+        return
+    
+    load_pretrained_backbone(model, ckpt_path, strict=strict)
+
+
+def set_backbone_requires_grad(model, requires_grad=True):
+    """Set requires_grad for all backbone parameters.
+    
+    Parameters
+    ----------
+    model : BackboneAachenClassificationLightning
+        The Lightning module containing the backbone
+    requires_grad : bool
+        Whether to compute gradients for backbone parameters (default: True)
+    """
+    num_params = 0
+    for param in model.backbone.parameters():
+        param.requires_grad = requires_grad
+        num_params += param.numel()
+    
+    status = "trainable" if requires_grad else "frozen"
+    print(f"Backbone set to {status}: {num_params:,} parameters")
+    return num_params
+
 
 def main():
     parser = argparse.ArgumentParser(description="OmniJet-alpha Anomaly Detection Training Script")
@@ -371,14 +486,21 @@ def main():
     parser.add_argument("--n_jets_train", type=list, default=list(map(int,os.getenv("N_JETS_TRAIN").strip('[]').split(','))), help="Number of jets per class for training [signal, background]")
     parser.add_argument("--embedding_dim", type=int, default=int(os.getenv("EMBEDDING_DIM")), help="Embedding dimension")
     parser.add_argument("--naming_identifier", type=str, default="", help="Optional identifier to add to the run name for easier tracking")
+    parser.add_argument("--pretrained_ckpt", type=str, help="Path to pre-trained checkpoint")
+    parser.add_argument("--load_pretrained", action="store_true", help="Load pre-trained backbone weights from checkpoint")
     parser.add_argument("--log_dir", type=str, default=str(os.getenv("LOG_DIR_AACHEN")), help="Directory for experiment logs")
     parser.add_argument("--use_class_weights", type=lambda x: x.lower() == 'true', default=True, help="Use automatic class weighting for imbalanced data (default: True)")
+    parser.add_argument("--freeze_backbone", action="store_true", help="Freeze backbone weights during training (no gradient updates)")
+    parser.add_argument("--update_backbone", action="store_true", default=True, help="Update backbone weights during training (default: True, set to False with --freeze_backbone)")
     
     # W&B arguments
     parser.add_argument("--use_wandb", action="store_true", help="Enable Weights & Biases logging")
     parser.add_argument("--wandb_project", type=str, default=str(os.getenv("WANDB_PROJECT")), help="W&B project name")
     parser.add_argument("--wandb_entity", type=str, default=None, help="W&B entity/team name (optional)")
     parser.add_argument("--wandb_run_name", type=str, default=None, help="W&B run name (optional, auto-generated if not provided)")
+    
+    # HPC arguments
+    parser.add_argument("--use_hpc", action="store_true", help="Disable progress bar for HPC environments to avoid large log files")
     
     args = parser.parse_args()
 
@@ -557,6 +679,20 @@ def main():
         },
     )
 
+    # Load pre-trained backbone weights if requested
+    if args.load_pretrained and args.pretrained_ckpt:
+        print(f"Loading pre-trained backbone weights from: {args.pretrained_ckpt}")
+        load_pretrained_backbone(model, args.pretrained_ckpt)
+        print("Successfully loaded pre-trained backbone weights!")
+    
+    # Freeze or update backbone based on arguments
+    if args.freeze_backbone:
+        set_backbone_requires_grad(model, requires_grad=False)
+        print("Backbone frozen - only classification head will be trained")
+    else:
+        set_backbone_requires_grad(model, requires_grad=True)
+        print("Backbone trainable - all parameters will be updated during training")
+
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model created with {num_params:,} parameters")
     
@@ -572,6 +708,9 @@ def main():
         "num_attention_heads": 8,
         "max_sequence_len": 128,
         "n_output_classes": 2,
+        "freeze_backbone": args.freeze_backbone,
+        "load_pretrained_checkpoint": args.load_pretrained and args.pretrained_ckpt,
+        "pretrained_checkpoint_path": args.pretrained_ckpt if (args.load_pretrained and args.pretrained_ckpt) else None,
         "model_kwargs": {k: v for k, v in model_kwargs.items() if k != "particle_features_dict"},
     }
     
@@ -697,6 +836,7 @@ def main():
         val_check_interval=0.1,  # Validate every 10% of training data
         gradient_clip_val=1.0,
         precision="32",
+        enable_progress_bar=not args.use_hpc,
         num_nodes=1,
         enable_progress_bar=True,
         enable_model_summary=True,

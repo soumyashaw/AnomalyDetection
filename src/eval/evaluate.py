@@ -50,6 +50,21 @@ from gabbro.data.data_utils import create_lhco_h5_test_loader
 load_dotenv()  # Load environment variables from .env file (for W&B API key, etc.)
 
 
+class AttrDict(dict):
+    """Dict with attribute-style access (obj.key) while keeping dict behavior.
+    
+    This is required for unpickling checkpoints saved with AttrDict objects.
+    """
+    def __getattr__(self, key):
+        try:
+            return self[key]
+        except KeyError as exc:
+            raise AttributeError(key) from exc
+
+    def __setattr__(self, key, value):
+        self[key] = value
+
+
 class DataCache:
     """Cache loaded HDF5 data to avoid repeated disk I/O."""
     
@@ -538,8 +553,167 @@ class ModelEvaluator:
         plt.close()
         print(f"Threshold analysis saved to {save_path}")
     
+    def calculate_r30(self, y_true, y_scores):
+        """Calculate R30 metric: background rejection at 30% signal efficiency.
+        
+        R30 = 1/FPR at TPR=0.3
+        
+        Parameters
+        ----------
+        y_true : np.ndarray
+            True labels
+        y_scores : np.ndarray
+            Predicted scores/probabilities
+            
+        Returns
+        -------
+        r30 : float
+            Background rejection factor at 30% signal efficiency
+        actual_tpr : float
+            Actual TPR at measurement point
+        status : str
+            Status message (ok, far_from_target, no_discrimination, insufficient_efficiency, fpr_zero)
+        """
+        # Check if predictions are essentially constant (no variation)
+        if np.std(y_scores) < 1e-9:
+            return 1.0, 0.0, "no_discrimination"
+        
+        fpr, tpr, _ = roc_curve(y_true, y_scores)
+        
+        # Find the FPR at TPR closest to 0.3
+        target_tpr = 0.3
+        idx = np.argmin(np.abs(tpr - target_tpr))
+        
+        actual_tpr = tpr[idx]
+        
+        # If TPR is essentially zero, model has no discrimination
+        if actual_tpr < 1e-6:
+            return 1.0, actual_tpr, "no_discrimination"
+        
+        # R30 is only meaningful if we can get reasonably close to 30% TPR
+        if actual_tpr < 0.2:  # Less than 20% signal efficiency
+            return 1.0, actual_tpr, "insufficient_efficiency"
+        
+        # Check if we're somewhat far from target TPR
+        if np.abs(actual_tpr - target_tpr) > 0.1:
+            status = "far_from_target"
+        else:
+            status = "ok"
+        
+        # R30 = 1/FPR at TPR=0.3 (or closest achievable)
+        if fpr[idx] > 0:
+            r30 = 1.0 / fpr[idx]
+        else:
+            r30 = np.inf
+            status = "fpr_zero"
+        
+        return r30, actual_tpr, status
+    
+    def calculate_sic(self, y_true, y_scores, signal_ratio=1.0):
+        """Calculate Significance Improvement Characteristic curve.
+        
+        Parameters
+        ----------
+        y_true : np.ndarray
+            True labels
+        y_scores : np.ndarray
+            Predicted scores/probabilities
+        signal_ratio : float
+            Signal ratio (default: 1.0 for balanced)
+            
+        Returns
+        -------
+        tpr : np.ndarray
+            True Positive Rate values
+        sic : np.ndarray
+            SIC values (TPR / sqrt(FPR))
+        """
+        # Sort by scores in descending order
+        sort_idx = np.argsort(-y_scores)
+        y_true_sorted = y_true[sort_idx]
+        
+        # Calculate cumulative true positives and false positives
+        n_signal = np.sum(y_true == 1)
+        n_background = np.sum(y_true == 0)
+        
+        tp_cumsum = np.cumsum(y_true_sorted)
+        fp_cumsum = np.cumsum(1 - y_true_sorted)
+        
+        # Calculate TPR and FPR
+        tpr = tp_cumsum / n_signal
+        fpr = fp_cumsum / n_background
+        
+        # Only calculate SIC where FPR > 0 to avoid division issues
+        valid_idx = fpr > 0
+        tpr_valid = tpr[valid_idx]
+        fpr_valid = fpr[valid_idx]
+        
+        # Calculate SIC: TPR / sqrt(FPR)
+        sic_valid = tpr_valid / np.sqrt(fpr_valid)
+        
+        # Add point at origin
+        tpr = np.concatenate([[0], tpr_valid])
+        sic = np.concatenate([[0], sic_valid])
+        
+        return tpr, sic
+    
+    def plot_sic_curve(self, y_true, y_scores, signal_ratios=None):
+        """Plot SIC curves for multiple signal ratios.
+        
+        Parameters
+        ----------
+        y_true : np.ndarray
+            True labels
+        y_scores : np.ndarray
+            Predicted scores/probabilities
+        signal_ratios : list, optional
+            Signal ratios to plot (default: [0.1, 0.3, 0.5, 1.0])
+        """
+        if signal_ratios is None:
+            signal_ratios = [0.1, 0.3, 0.5, 1.0]
+        
+        fig, ax = plt.subplots(figsize=(8, 6))
+        
+        # Color map for different signal ratios
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+        
+        # Plot SIC curves for each signal ratio
+        for idx, ratio in enumerate(signal_ratios):
+            tpr, sic = self.calculate_sic(y_true, y_scores, signal_ratio=ratio)
+            
+            label = f"{ratio * 100:.1f}%"
+            color = colors[idx % len(colors)]
+            ax.plot(tpr, sic, linewidth=2.0, label=label, color=color)
+        
+        # Plot random classifier baseline (SIC = sqrt(TPR))
+        tpr_random = np.linspace(0, 1, 1000)
+        sic_random = np.sqrt(tpr_random)
+        ax.plot(tpr_random, sic_random, 'k--', linewidth=2, label='random', alpha=0.7)
+        
+        # Formatting
+        ax.set_xlabel('True Positive Rate', fontsize=14)
+        ax.set_ylabel('SIC (TPR / $\\sqrt{\\mathrm{FPR}}$)', fontsize=14)
+        ax.set_xlim([0.0, 1.0])
+        ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+        ax.legend(title='Signal ratio', loc='upper right', fontsize=12, title_fontsize=12)
+        ax.tick_params(labelsize=12)
+        
+        plt.tight_layout()
+        
+        save_path = self.eval_dir / 'sic_curve.png'
+        fig.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"SIC curve saved to {save_path}")
+    
     def save_results(self, metrics, y_true, y_pred):
         """Save evaluation results to JSON."""
+        # Add R30 to metrics if not already present
+        if "r30" not in metrics:
+            r30, actual_tpr, status = self.calculate_r30(y_true, y_pred)
+            metrics["r30"] = float(r30) if not np.isinf(r30) else "inf"
+            metrics["r30_tpr"] = float(actual_tpr)
+            metrics["r30_status"] = status
+        
         results = {
             "checkpoint_path": str(self.checkpoint_path),
             "evaluation_timestamp": self.timestamp,
@@ -578,7 +752,17 @@ class ModelEvaluator:
             f.write(f"Sensitivity (TPR):    {metrics['sensitivity']:.4f}\n")
             f.write(f"Specificity (TNR):    {metrics['specificity']:.4f}\n")
             f.write(f"Threshold Used:       {metrics['threshold_used']:.4f}\n")
-            f.write(f"Optimal Threshold:    {metrics['optimal_threshold']:.4f}\n\n")
+            f.write(f"Optimal Threshold:    {metrics['optimal_threshold']:.4f}\n")
+            # Add R30 if available
+            if "r30" in metrics:
+                r30_val = metrics['r30']
+                if isinstance(r30_val, str):
+                    f.write(f"R30 (30% TPR):        {r30_val}\n")
+                else:
+                    f.write(f"R30 (30% TPR):        {r30_val:.4f}\n")
+                f.write(f"R30 Actual TPR:       {metrics.get('r30_tpr', 'N/A')}\n")
+                f.write(f"R30 Status:           {metrics.get('r30_status', 'N/A')}\n")
+            f.write("\n")
             f.write("-" * 80 + "\n")
             f.write("DATA STATISTICS\n")
             f.write("-" * 80 + "\n")
@@ -616,6 +800,13 @@ class ModelEvaluator:
         metrics, (fpr, tpr, roc_thresholds), (precision, recall, pr_thresholds) = \
             self.calculate_metrics(y_true, y_pred, threshold)
         
+        # Calculate R30 metric
+        print("Calculating R30 metric...")
+        r30, actual_tpr, r30_status = self.calculate_r30(y_true, y_pred)
+        metrics["r30"] = float(r30) if not np.isinf(r30) else "inf"
+        metrics["r30_tpr"] = float(actual_tpr)
+        metrics["r30_status"] = r30_status
+        
         # Print key metrics
         print("\n" + "-" * 80)
         print("KEY METRICS")
@@ -625,6 +816,10 @@ class ModelEvaluator:
         print(f"Accuracy:             {metrics['accuracy']:.4f}")
         print(f"Sensitivity (TPR):    {metrics['sensitivity']:.4f}")
         print(f"Specificity (TNR):    {metrics['specificity']:.4f}")
+        if isinstance(metrics["r30"], str):
+            print(f"R30 (30% TPR):        {metrics['r30']} ({r30_status})")
+        else:
+            print(f"R30 (30% TPR):        {metrics['r30']:.2f} (TPR={metrics['r30_tpr']:.4f}, {r30_status})")
         print("-" * 80 + "\n")
         
         # Generate plots
@@ -634,6 +829,10 @@ class ModelEvaluator:
         self.plot_confusion_matrix(np.array(metrics['confusion_matrix']))
         self.plot_score_distribution(y_true, y_pred)
         self.plot_threshold_analysis(fpr, tpr, roc_thresholds)
+        
+        # Generate SIC curve
+        print("Generating SIC curve...")
+        self.plot_sic_curve(y_true, y_pred, signal_ratios=[0.6, 1.0, 2.0, 5.0, 10.0])
         
         # Save results
         print("\nSaving results...")

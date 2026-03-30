@@ -48,243 +48,35 @@ Trains a custom anomaly detection model on LHCO datasets using weak supervision.
 """
 # imports
 import os
+import umap
 import json
 import torch
 import argparse
 import numpy as np
 import awkward as ak
 import lightning as L
+import awkward as ak
 from functools import partial
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, TensorDataset
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, Callback
-from sklearn.metrics import roc_auc_score, roc_curve, silhouette_score, davies_bouldin_score
+from sklearn.metrics import roc_auc_score, roc_curve
 from sklearn.manifold import TSNE
+from sklearn.preprocessing import StandardScaler
 from lightning.pytorch.loggers import WandbLogger
 from dotenv import load_dotenv
 from datetime import datetime
 from pathlib import Path
 import wandb
 import matplotlib.pyplot as plt
-import matplotlib
-matplotlib.use('Agg')  # Non-interactive backend
-
-try:
-    import umap
-    HAS_UMAP = True
-except ImportError:
-    HAS_UMAP = False
-    print("⚠️ UMAP not installed. Install with: pip install umap-learn")
 
 # gabbro imports
 from gabbro.utils.arrays import ak_pad
-from gabbro.data.data_utils import create_custom_lhco_h5_dataloaders
+from gabbro.data.data_utils import create_custom_lhco_h5_dataloaders, create_lhco_h5_dataloaders, create_lhco_h5_test_loader
 from gabbro.models.backbone import BackboneClassificationLightning, BackboneDijetClassificationLightning, BackboneAachenClassificationLightning
 from gabbro.data.loading import load_lhco_jets_from_h5, load_multiple_h5_files
 
 load_dotenv()  # Load environment variables from .env file (for W&B API key, etc.)
-
-
-# ============================================================================
-# LATENT SPACE TRACKING FOR CATASTROPHIC FORGETTING DETECTION
-# ============================================================================
-
-def load_golden_batch(signal_path, supp_bg_path, feature_dict, batch_size=64, 
-                      n_signal=32, n_background=32, max_sequence_len=128, 
-                      mom4_format="epxpypz", jet_name="both"):
-    """
-    Load a "Golden Batch" with guaranteed 50/50 signal-background composition.
-    
-    Injected at step 100 to study catastrophic forgetting recovery.
-    Data comes from TRAINING sets (not test), but separate from train/val split.
-    """
-    print(f"\n{'='*80}")
-    print(f"Loading Golden Batch (50% signal / 50% background)")
-    print(f"{'='*80}\n")
-    
-    feature_names = list(feature_dict.keys())
-    
-    # Load signal jets
-    print(f"Loading {n_signal} signal jets from {signal_path}...")
-    if jet_name == "both":
-        signal_jet1, signal_jet2, _ = load_lhco_jets_from_h5(
-            signal_path, feature_dict, n_jets=n_signal, jet_name="both", mom4_format=mom4_format
-        )
-        signal_jet1_padded, signal_mask1 = ak_pad(signal_jet1, maxlen=max_sequence_len, return_mask=True)
-        signal_jet2_padded, signal_mask2 = ak_pad(signal_jet2, maxlen=max_sequence_len, return_mask=True)
-        
-        signal_jet1_stacked = ak.concatenate(
-            [signal_jet1_padded[feat][..., np.newaxis] for feat in feature_names], axis=-1
-        )
-        signal_jet2_stacked = ak.concatenate(
-            [signal_jet2_padded[feat][..., np.newaxis] for feat in feature_names], axis=-1
-        )
-        signal_data = {
-            "part_features": torch.from_numpy(ak.to_numpy(signal_jet1_stacked)).float(),
-            "part_mask": torch.from_numpy(ak.to_numpy(signal_mask1)).float(),
-            "part_features_jet2": torch.from_numpy(ak.to_numpy(signal_jet2_stacked)).float(),
-            "part_mask_jet2": torch.from_numpy(ak.to_numpy(signal_mask2)).float(),
-        }
-    else:
-        signal_jets, _ = load_lhco_jets_from_h5(
-            signal_path, feature_dict, n_jets=n_signal, jet_name=jet_name, mom4_format=mom4_format
-        )
-        signal_padded, signal_mask = ak_pad(signal_jets, maxlen=max_sequence_len, return_mask=True)
-        signal_stacked = ak.concatenate(
-            [signal_padded[feat][..., np.newaxis] for feat in feature_names], axis=-1
-        )
-        signal_data = {
-            "part_features": torch.from_numpy(ak.to_numpy(signal_stacked)).float(),
-            "part_mask": torch.from_numpy(ak.to_numpy(signal_mask)).float(),
-        }
-    
-    # Load background jets
-    print(f"Loading {n_background} background jets from {supp_bg_path}...")
-    if jet_name == "both":
-        bg_jet1, bg_jet2, _ = load_lhco_jets_from_h5(
-            supp_bg_path, feature_dict, n_jets=n_background, jet_name="both", mom4_format=mom4_format
-        )
-        bg_jet1_padded, bg_mask1 = ak_pad(bg_jet1, maxlen=max_sequence_len, return_mask=True)
-        bg_jet2_padded, bg_mask2 = ak_pad(bg_jet2, maxlen=max_sequence_len, return_mask=True)
-        
-        bg_jet1_stacked = ak.concatenate(
-            [bg_jet1_padded[feat][..., np.newaxis] for feat in feature_names], axis=-1
-        )
-        bg_jet2_stacked = ak.concatenate(
-            [bg_jet2_padded[feat][..., np.newaxis] for feat in feature_names], axis=-1
-        )
-        bg_data = {
-            "part_features": torch.from_numpy(ak.to_numpy(bg_jet1_stacked)).float(),
-            "part_mask": torch.from_numpy(ak.to_numpy(bg_mask1)).float(),
-            "part_features_jet2": torch.from_numpy(ak.to_numpy(bg_jet2_stacked)).float(),
-            "part_mask_jet2": torch.from_numpy(ak.to_numpy(bg_mask2)).float(),
-        }
-    else:
-        bg_jets, _ = load_lhco_jets_from_h5(
-            supp_bg_path, feature_dict, n_jets=n_background, jet_name=jet_name, mom4_format=mom4_format
-        )
-        bg_padded, bg_mask = ak_pad(bg_jets, maxlen=max_sequence_len, return_mask=True)
-        bg_stacked = ak.concatenate(
-            [bg_padded[feat][..., np.newaxis] for feat in feature_names], axis=-1
-        )
-        bg_data = {
-            "part_features": torch.from_numpy(ak.to_numpy(bg_stacked)).float(),
-            "part_mask": torch.from_numpy(ak.to_numpy(bg_mask)).float(),
-        }
-    
-    # Combine into single batch
-    golden_batch = {}
-    for key in signal_data:
-        golden_batch[key] = torch.cat([signal_data[key], bg_data[key]], dim=0)
-    
-    # Labels: [1, 1, ..., 1 (n_signal), 0, 0, ..., 0 (n_background)]
-    golden_batch["jet_type_labels"] = torch.cat([
-        torch.ones(n_signal, dtype=torch.long),
-        torch.zeros(n_background, dtype=torch.long),
-    ])
-    
-    print(f"Golden batch created: {n_signal} signal + {n_background} background = {batch_size} total\n")
-    return golden_batch
-
-
-def load_tracking_set(signal_test_path, bg_test_path, feature_dict, 
-                      n_signal=100, n_background=100, max_sequence_len=128,
-                      mom4_format="epxpypz", jet_name="both"):
-    """
-    Load tracking set from TEST data (independent of train/val/golden_batch).
-    
-    Used to monitor latent space and catastrophic forgetting recovery.
-    """
-    print(f"\n{'='*80}")
-    print(f"Loading Tracking Set from TEST data (independent from training)")
-    print(f"{'='*80}\n")
-    
-    feature_names = list(feature_dict.keys())
-    
-    # Load signal jets from TEST
-    print(f"Loading {n_signal} signal jets from {signal_test_path}...")
-    if jet_name == "both":
-        signal_jet1, signal_jet2, _ = load_lhco_jets_from_h5(
-            signal_test_path, feature_dict, n_jets=n_signal, jet_name="both", mom4_format=mom4_format
-        )
-        signal_jet1_padded, signal_mask1 = ak_pad(signal_jet1, maxlen=max_sequence_len, return_mask=True)
-        signal_jet2_padded, signal_mask2 = ak_pad(signal_jet2, maxlen=max_sequence_len, return_mask=True)
-        
-        signal_jet1_stacked = ak.concatenate(
-            [signal_jet1_padded[feat][..., np.newaxis] for feat in feature_names], axis=-1
-        )
-        signal_jet2_stacked = ak.concatenate(
-            [signal_jet2_padded[feat][..., np.newaxis] for feat in feature_names], axis=-1
-        )
-        signal_data = {
-            "part_features": torch.from_numpy(ak.to_numpy(signal_jet1_stacked)).float(),
-            "part_mask": torch.from_numpy(ak.to_numpy(signal_mask1)).float(),
-            "part_features_jet2": torch.from_numpy(ak.to_numpy(signal_jet2_stacked)).float(),
-            "part_mask_jet2": torch.from_numpy(ak.to_numpy(signal_mask2)).float(),
-        }
-    else:
-        signal_jets, _ = load_lhco_jets_from_h5(
-            signal_test_path, feature_dict, n_jets=n_signal, jet_name=jet_name, mom4_format=mom4_format
-        )
-        signal_padded, signal_mask = ak_pad(signal_jets, maxlen=max_sequence_len, return_mask=True)
-        signal_stacked = ak.concatenate(
-            [signal_padded[feat][..., np.newaxis] for feat in feature_names], axis=-1
-        )
-        signal_data = {
-            "part_features": torch.from_numpy(ak.to_numpy(signal_stacked)).float(),
-            "part_mask": torch.from_numpy(ak.to_numpy(signal_mask)).float(),
-        }
-    
-    # Load background jets from TEST
-    print(f"Loading {n_background} background jets from {bg_test_path}...")
-    if jet_name == "both":
-        bg_jet1, bg_jet2, _ = load_lhco_jets_from_h5(
-            bg_test_path, feature_dict, n_jets=n_background, jet_name="both", mom4_format=mom4_format
-        )
-        bg_jet1_padded, bg_mask1 = ak_pad(bg_jet1, maxlen=max_sequence_len, return_mask=True)
-        bg_jet2_padded, bg_mask2 = ak_pad(bg_jet2, maxlen=max_sequence_len, return_mask=True)
-        
-        bg_jet1_stacked = ak.concatenate(
-            [bg_jet1_padded[feat][..., np.newaxis] for feat in feature_names], axis=-1
-        )
-        bg_jet2_stacked = ak.concatenate(
-            [bg_jet2_padded[feat][..., np.newaxis] for feat in feature_names], axis=-1
-        )
-        bg_data = {
-            "part_features": torch.from_numpy(ak.to_numpy(bg_jet1_stacked)).float(),
-            "part_mask": torch.from_numpy(ak.to_numpy(bg_mask1)).float(),
-            "part_features_jet2": torch.from_numpy(ak.to_numpy(bg_jet2_stacked)).float(),
-            "part_mask_jet2": torch.from_numpy(ak.to_numpy(bg_mask2)).float(),
-        }
-    else:
-        bg_jets, _ = load_lhco_jets_from_h5(
-            bg_test_path, feature_dict, n_jets=n_background, jet_name=jet_name, mom4_format=mom4_format
-        )
-        bg_padded, bg_mask = ak_pad(bg_jets, maxlen=max_sequence_len, return_mask=True)
-        bg_stacked = ak.concatenate(
-            [bg_padded[feat][..., np.newaxis] for feat in feature_names], axis=-1
-        )
-        bg_data = {
-            "part_features": torch.from_numpy(ak.to_numpy(bg_stacked)).float(),
-            "part_mask": torch.from_numpy(ak.to_numpy(bg_mask)).float(),
-        }
-    
-    # Combine into tracking set
-    tracking_set = {}
-    for key in signal_data:
-        tracking_set[key] = torch.cat([signal_data[key], bg_data[key]], dim=0)
-    
-    # True labels (ground truth)
-    tracking_set["true_labels"] = torch.cat([
-        torch.ones(n_signal, dtype=torch.long),
-        torch.zeros(n_background, dtype=torch.long),
-    ])
-    
-    print(f"Tracking set created: {n_signal} signal + {n_background} background = {n_signal + n_background} total")
-    print(f"⚠️  Data from TEST set (completely independent)\n")
-    
-    return tracking_set
-
 
 class ExperimentLogger:
     """Handles logging of experiment configuration and results."""
@@ -440,7 +232,6 @@ def create_model_config(pp_dict, args):
     
     return model_kwargs
 
-
 class AUCCallback(Callback):
     """Compute AUC on the validation set at the end of each validation epoch
     and log it to the LightningModule so it becomes part of callback_metrics.
@@ -587,309 +378,626 @@ class ARGOSCallback(Callback):
         pl_module.log("val_argos", argos, prog_bar=True, logger=True)
 
 
-class LatentSpaceCallback(Callback):
-    """Track latent space representations and visualize catastrophic forgetting."""
+class EmbeddingVisualizationCallback(Callback):
+    """Extract embeddings and generate t-SNE/UMAP plots after each training batch.
     
-    def __init__(self, tracking_set, device, jet_name="both", log_dir="logs", 
-                 tracking_steps=None, embedding_dim=128):
-        """
+    Saves visualizations to plots/catastrophic_forgetting/{batch_idx}/ for tracking
+    how embeddings evolve during training.
+    """
+
+    def __init__(self, test_loader, output_base_dir="plots/catastrophic_forgetting", log_frequency=1):
+        """Initialize callback.
+        
         Parameters
         ----------
-        tracking_set : dict
-            Fixed set of signal/background jets for latent tracking
-        device : torch.device
-            Device to run on
-        jet_name : str
-            "jet1", "jet2", or "both"
-        log_dir : str
-            Directory to save visualizations
-        tracking_steps : list
-            Steps at which to track (e.g., [99, 100, 101, 150, 199])
-        embedding_dim : int
-            Backbone embedding dimension
+        test_loader : DataLoader
+            Test dataloader to extract embeddings from
+        output_base_dir : str
+            Base directory for saving visualizations
+        log_frequency : int
+            Log visualization every N batches (default: 1, every batch)
         """
-        super().__init__()
-        self.tracking_set = tracking_set
-        self.device = device
-        self.jet_name = jet_name
-        self.log_dir = Path(log_dir)
-        self.log_dir.mkdir(parents=True, exist_ok=True)
-        self.embedding_dim = embedding_dim
-        self.track_steps = tracking_steps if tracking_steps else [1, 99, 100, 101, 150, 199]
-        self.true_labels = tracking_set["true_labels"].numpy()
-        
-        # Store embeddings and metrics
-        self.embeddings_history = {}
-        self.metrics_history = {"silhouette": {}, "davies_bouldin": {}}
-        
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        """Called after each training batch."""
-        current_step = trainer.global_step
-        
-        if current_step not in self.track_steps:
-            return
-        
-        print(f"\n{'='*80}")
-        print(f"LATENT SPACE TRACKING at Step {current_step}")
-        print(f"{'='*80}")
-        
-        embeddings = self._extract_embeddings(pl_module)
-        if embeddings is None:
-            print("⚠️ Failed to extract embeddings")
-            return
-        
-        self.embeddings_history[current_step] = embeddings
-        
-        # Compute clustering metrics
-        sil_score = silhouette_score(embeddings, self.true_labels)
-        db_score = davies_bouldin_score(embeddings, self.true_labels)
-        
-        self.metrics_history["silhouette"][current_step] = sil_score
-        self.metrics_history["davies_bouldin"][current_step] = db_score
-        
-        print(f"Signal-Background Separation Metrics:")
-        print(f"  Silhouette Score: {sil_score:.4f} (↑ better)")
-        print(f"  Davies-Bouldin Index: {db_score:.4f} (↓ better)")
-        print(f"{'='*80}\n")
-        
-        # Visualize
-        self._visualize_embeddings(current_step, embeddings)
-    
-    def _extract_embeddings(self, model):
-        """Extract latent embeddings from backbone."""
-        model.eval()
-        embeddings = []
-        
-        def hook_fn(module, input, output):
-            embeddings.append(output.detach().cpu().numpy())
-        
-        if hasattr(model, 'backbone'):
-            hook = model.backbone.register_forward_hook(hook_fn)
-        else:
-            return None
-        
+        self.test_loader = test_loader
+        self.output_base_dir = Path(output_base_dir)
+        self.output_base_dir.mkdir(parents=True, exist_ok=True)
+        self.log_frequency = log_frequency
+        self.batch_count = 0
+
+    def extract_embeddings(self, pl_module, device):
+        """Extract embeddings from test loader."""
+        all_embeddings = []
+        all_labels = []
+
+        pl_module.eval()
+        with torch.no_grad():
+            for batch in self.test_loader:
+                labels = batch["jet_type_labels"]
+
+                if isinstance(pl_module, (BackboneDijetClassificationLightning, BackboneAachenClassificationLightning)):
+                    X1 = batch["part_features"].to(device)
+                    X2 = batch["part_features_jet2"].to(device)
+                    mask1 = batch["part_mask"].to(device)
+                    mask2 = batch["part_mask_jet2"].to(device)
+
+                    emb1 = pl_module.backbone(X1, mask1)
+                    emb2 = pl_module.backbone(X2, mask2)
+
+                    mask1_bool = mask1.bool()
+                    mask2_bool = mask2.bool()
+
+                    emb1_masked = emb1 * mask1_bool.unsqueeze(-1)
+                    emb1_sum = emb1_masked.sum(dim=1)
+                    valid_count1 = mask1_bool.sum(dim=1, keepdim=True).clamp(min=1)
+                    emb1_pooled = emb1_sum / valid_count1
+
+                    emb2_masked = emb2 * mask2_bool.unsqueeze(-1)
+                    emb2_sum = emb2_masked.sum(dim=1)
+                    valid_count2 = mask2_bool.sum(dim=1, keepdim=True).clamp(min=1)
+                    emb2_pooled = emb2_sum / valid_count2
+
+                    embeddings = torch.cat([emb1_pooled, emb2_pooled], dim=1)
+                else:
+                    X = batch["part_features"].to(device)
+                    mask = batch["part_mask"].to(device)
+
+                    emb = pl_module.backbone(X, mask)
+                    mask_bool = mask.bool()
+                    emb_masked = emb * mask_bool.unsqueeze(-1)
+                    emb_sum = emb_masked.sum(dim=1)
+                    valid_count = mask_bool.sum(dim=1, keepdim=True).clamp(min=1)
+                    embeddings = emb_sum / valid_count
+
+                all_embeddings.append(embeddings.cpu().numpy())
+                all_labels.append(labels.cpu().numpy())
+
+        embeddings_np = np.concatenate(all_embeddings, axis=0)
+        labels_np = np.concatenate(all_labels, axis=0)
+        return embeddings_np, labels_np
+
+    def plot_tsne(self, embeddings, labels, save_dir):
+        """Generate t-SNE plot."""
         try:
-            with torch.no_grad():
-                batch_size = 64
-                for i in range(0, len(self.tracking_set["part_features"]), batch_size):
-                    batch_end = min(i + batch_size, len(self.tracking_set["part_features"]))
-                    batch = {
-                        k: v[i:batch_end].to(self.device) 
-                        for k, v in self.tracking_set.items() 
-                        if torch.is_tensor(v) and k != "true_labels"
-                    }
-                    
-                    if self.jet_name == "both":
-                        X1 = batch["part_features"]
-                        mask1 = batch["part_mask"]
-                        X2 = batch["part_features_jet2"]
-                        mask2 = batch["part_mask_jet2"]
-                        _ = model(X1, mask1, X2, mask2)
-                    else:
-                        X = batch["part_features"]
-                        mask = batch["part_mask"]
-                        _ = model(X, mask)
-        finally:
-            hook.remove()
-        
-        if not embeddings:
-            return None
-        
-        return np.concatenate(embeddings, axis=0)
-    
-    def _visualize_embeddings(self, step, embeddings):
-        """Create UMAP and t-SNE visualizations."""
-        output_dir = self.log_dir / "catastrophic_forgetting_tracking"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Reduce dimensionality if needed
-        if embeddings.shape[1] > 50:
-            from sklearn.decomposition import PCA
-            pca = PCA(n_components=50)
-            embeddings_reduced = pca.fit_transform(embeddings)
+            scaler = StandardScaler()
+            embeddings_scaled = scaler.fit_transform(embeddings)
+
+            tsne = TSNE(n_components=2, perplexity=30, max_iter=1000,
+                       random_state=42, n_jobs=-1, verbose=0)
+            embeddings_tsne = tsne.fit_transform(embeddings_scaled)
+
+            plt.figure(figsize=(10, 8))
+            bg_mask = labels == 0
+            sig_mask = labels == 1
+
+            plt.scatter(embeddings_tsne[bg_mask, 0], embeddings_tsne[bg_mask, 1],
+                       c='#FA8072', label='Background', alpha=0.6, s=5)
+            plt.scatter(embeddings_tsne[sig_mask, 0], embeddings_tsne[sig_mask, 1],
+                       c='#4FFFB0', label='Signal', alpha=0.6, s=5)
+
+            plt.xlabel('t-SNE 1', fontsize=12)
+            plt.ylabel('t-SNE 2', fontsize=12)
+            plt.title(f'Jet Embeddings (t-SNE)', fontsize=14)
+            plt.legend(fontsize=11)
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+
+            save_path = save_dir / 'embeddings_tsne.png'
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            plt.close()
+        except Exception as e:
+            print(f"Error generating t-SNE plot: {e}")
+
+    def plot_umap(self, embeddings, labels, save_dir):
+        """Generate UMAP plot."""
+        try:
+            scaler = StandardScaler()
+            embeddings_scaled = scaler.fit_transform(embeddings)
+
+            reducer = umap.UMAP(n_components=2, n_neighbors=15,
+                               min_dist=0.1, random_state=42, n_jobs=1)
+            embeddings_umap = reducer.fit_transform(embeddings_scaled)
+
+            plt.figure(figsize=(10, 8))
+            bg_mask = labels == 0
+            sig_mask = labels == 1
+
+            plt.scatter(embeddings_umap[bg_mask, 0], embeddings_umap[bg_mask, 1],
+                       c='#FA8072', label='Background', alpha=0.6, s=5)
+            plt.scatter(embeddings_umap[sig_mask, 0], embeddings_umap[sig_mask, 1],
+                       c='#4FFFB0', label='Signal', alpha=0.6, s=5)
+
+            plt.xlabel('UMAP 1', fontsize=12)
+            plt.ylabel('UMAP 2', fontsize=12)
+            plt.title(f'Jet Embeddings (UMAP)', fontsize=14)
+            plt.legend(fontsize=11)
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+
+            save_path = save_dir / 'embeddings_umap.png'
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            plt.close()
+        except Exception as e:
+            print(f"Error generating UMAP plot: {e}")
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        """Visualize embeddings at specified frequency."""
+        self.batch_count += 1
+
+        if self.batch_count % self.log_frequency != 0:
+            return
+
+        if self.test_loader is None:
+            return
+
+        device = pl_module.device if hasattr(pl_module, 'device') else (
+            torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+        )
+
+        # Create batch-specific directory
+        batch_dir = self.output_base_dir / f"batch_{self.batch_count:06d}"
+        batch_dir.mkdir(parents=True, exist_ok=True)
+
+        print(f"\n[Batch {self.batch_count}] Extracting embeddings and generating visualizations...")
+
+        # Extract embeddings
+        embeddings, labels = self.extract_embeddings(pl_module, device)
+
+        # Generate plots
+        self.plot_tsne(embeddings, labels, batch_dir)
+        self.plot_umap(embeddings, labels, batch_dir)
+
+        print(f"  Plots saved to: {batch_dir}")
+
+class ARGOSCallback(Callback):
+    """Compute ARGOS metric on the validation set at the end of each validation epoch.
+    ARGOS is defined as: max(tpr/sqrt(fpr) - sqrt(tpr)) for fpr > 0.
+    """
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        # Get validation dataloader
+        try:
+            val_loaders = trainer.val_dataloaders
+        except Exception:
+            val_loaders = None
+        if not val_loaders:
+            return
+
+        # Handle both single DataLoader and list of DataLoaders
+        if isinstance(val_loaders, list):
+            val_loader = val_loaders[0]
         else:
-            embeddings_reduced = embeddings
-        
-        # UMAP
-        if HAS_UMAP:
-            print(f"Computing UMAP...")
-            umap_proj = umap.UMAP(n_components=2, random_state=42, n_neighbors=15).fit_transform(embeddings_reduced)
-            self._save_visualization(umap_proj, step, "umap", output_dir)
-        
-        # t-SNE
-        print(f"Computing t-SNE...")
-        tsne_proj = TSNE(n_components=2, random_state=42, perplexity=30).fit_transform(embeddings_reduced)
-        self._save_visualization(tsne_proj, step, "tsne", output_dir)
-    
-    def _save_visualization(self, proj_2d, step, method, output_dir):
-        """Save 2D visualization."""
-        fig, ax = plt.subplots(figsize=(10, 8))
-        
-        n_signal = len(self.true_labels) // 2
-        bg_indices = np.arange(n_signal, len(self.true_labels))
-        signal_indices = np.arange(n_signal)
-        
-        ax.scatter(proj_2d[bg_indices, 0], proj_2d[bg_indices, 1], 
-                  c='blue', label='Background', alpha=0.6, s=50)
-        ax.scatter(proj_2d[signal_indices, 0], proj_2d[signal_indices, 1], 
-                  c='red', label='Signal', alpha=0.6, s=50)
-        
-        ax.set_xlabel(f"{method.upper()} 1")
-        ax.set_ylabel(f"{method.upper()} 2")
-        ax.set_title(f"Latent Space at Step {step} ({method.upper()})")
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        output_path = output_dir / f"latent_space_step{step:05d}_{method}.png"
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        plt.close()
-    
-    def on_train_end(self, trainer, pl_module):
-        """Save summary metrics when training ends."""
-        metrics_path = self.log_dir / "catastrophic_forgetting_tracking" / "metrics.json"
-        metrics_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        summary = {
-            "silhouette": {str(k): v for k, v in self.metrics_history["silhouette"].items()},
-            "davies_bouldin": {str(k): v for k, v in self.metrics_history["davies_bouldin"].items()},
-        }
-        
-        with open(metrics_path, 'w') as f:
-            json.dump(summary, f, indent=4)
-        
-        print(f"\nLatent space tracking complete! Saved to {metrics_path}")
+            val_loader = val_loaders
+            
+        device = pl_module.device if hasattr(pl_module, 'device') else (torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu'))
+
+        all_preds = []
+        all_labels = []
+
+        pl_module.eval()
+        with torch.no_grad():
+            for batch in val_loader:
+                labels = batch["jet_type_labels"].to(device)
+                
+                # Check if model is dijet or single-jet
+                if isinstance(pl_module, BackboneAachenClassificationLightning):
+                    X1 = batch["part_features"].to(device)
+                    X2 = batch["part_features_jet2"].to(device)
+                    mask1 = batch["part_mask"].to(device)
+                    mask2 = batch["part_mask_jet2"].to(device)
+                    logits = pl_module(X1, mask1, X2, mask2)
+                else:
+                    X = batch["part_features"].to(device)
+                    mask = batch["part_mask"].to(device)
+                    logits = pl_module(X, mask)
+
+                # Handle different logit shapes
+                if logits.dim() == 1:
+                    # Binary classification with single logit (BCEWithLogitsLoss)
+                    probs = torch.sigmoid(logits).cpu().numpy()
+                else:
+                    # Multi-class with softmax
+                    probs = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
+                all_preds.append(probs)
+                all_labels.append(labels.cpu().numpy())
+
+        if len(all_preds) == 0:
+            return
+
+        y_pred = np.concatenate(all_preds)
+        y_true = np.concatenate(all_labels)
+
+        # Compute ARGOS metric
+        try:
+            fpr, tpr, thresholds = roc_curve(y_true, y_pred)
+            inds = np.nonzero(fpr)
+            tpr = tpr[inds]
+            fpr = fpr[inds]
+            argos = float(np.max(tpr/np.sqrt(fpr) - np.sqrt(tpr)))
+        except Exception:
+            argos = float('nan')
+
+        # Log the metric
+        pl_module.log("val_argos", argos, prog_bar=True, logger=True)
 
 
-def load_pretrained_backbone(model, ckpt_path, strict=False):
-    """Load pre-trained backbone weights from a checkpoint.
+class TestROCCallback(Callback):
+    """Compute ROC AUC on the test set after each training batch and log it.
+
+    Note: this is computationally expensive because it runs inference over the
+    entire test loader after every train batch.
+    """
+
+    def __init__(self, test_loader):
+        self.test_loader = test_loader
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        if self.test_loader is None:
+            return
+
+        device = pl_module.device if hasattr(pl_module, 'device') else (
+            torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+        )
+
+        all_preds = []
+        all_labels = []
+        was_training = pl_module.training
+
+        pl_module.eval()
+        with torch.no_grad():
+            for test_batch in self.test_loader:
+                labels = test_batch["jet_type_labels"].to(device)
+
+                if isinstance(pl_module, (BackboneDijetClassificationLightning, BackboneAachenClassificationLightning)):
+                    X1 = test_batch["part_features"].to(device)
+                    X2 = test_batch["part_features_jet2"].to(device)
+                    mask1 = test_batch["part_mask"].to(device)
+                    mask2 = test_batch["part_mask_jet2"].to(device)
+                    logits = pl_module(X1, mask1, X2, mask2)
+                else:
+                    X = test_batch["part_features"].to(device)
+                    mask = test_batch["part_mask"].to(device)
+                    logits = pl_module(X, mask)
+
+                if logits.dim() == 1:
+                    probs = torch.sigmoid(logits).cpu().numpy()
+                else:
+                    probs = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
+
+                all_preds.append(probs)
+                all_labels.append(labels.cpu().numpy())
+
+        if was_training:
+            pl_module.train()
+
+        if len(all_preds) == 0:
+            return
+
+        y_pred = np.concatenate(all_preds)
+        y_true = np.concatenate(all_labels)
+
+        try:
+            test_roc = float(roc_auc_score(y_true, y_pred))
+        except Exception:
+            test_roc = float('nan')
+
+        pl_module.log("test_roc", test_roc, on_step=True, on_epoch=False, logger=True, prog_bar=False)
+
+
+class SignalInjectionCallback(Callback):
+    """Inject real signal jets into training data every N batches.
     
-    This function loads backbone weights from a pre-trained checkpoint with
-    flexible handling of dimension mismatches. Layers with compatible dimensions
-    are loaded, while incompatible layers (e.g., input projection due to different
-    feature counts) are initialized randomly.
+    This callback implements the catastrophic forgetting experiment by:
+    1. Starting training with minimal signal (n_jets_train_artificial=[1, ...])
+    2. After every inject_freq batches, injecting real signal jets (--num_signal_jets)
+       loaded via load_injectable_signal_jets()
+    3. Replacing Label 1 (polluted background) samples with injected signal samples
+    
+    This tests if the model can recognize real signal despite initial weak supervision.
+    """
+    
+    def __init__(self, signal_path, injection_signal_jets, num_signal_jets, input_features_dict, inject_freq=10):
+        """Initialize the signal injection callback.
+        
+        Parameters
+        ----------
+        signal_path : str
+            Path to the signal H5 file
+        num_signal_jets : int
+            Number of signal jets to inject per injection event
+        input_features_dict : dict
+            Feature preprocessing dictionary
+        inject_freq : int
+            Inject signal every N batches
+        """
+        self.signal_path = signal_path
+        self.injection_signal_jets = injection_signal_jets
+        self.num_signal_jets = num_signal_jets
+        self.input_features_dict = input_features_dict
+        self.inject_freq = inject_freq
+        self.batch_count = 0
+        self.injectable_signal_jets = None
+        self.signal_index = 0
+        
+    def on_train_start(self, trainer, pl_module):
+        """Load injectable signal jets at the start of training."""
+        print(f"\n[SignalInjectionCallback] Loading injectable signal jets from {self.signal_path}...")
+        try:
+            self.injectable_signal_jets = load_injectable_signal_jets(
+                self.signal_path, 
+                self.injection_signal_jets,
+                self.input_features_dict
+            )
+            print(f"[SignalInjectionCallback] Loaded signal jets for injection.")
+        except Exception as e:
+            print(f"[SignalInjectionCallback] Warning: Failed to load injectable signal jets: {e}")
+            self.injectable_signal_jets = None
+    
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        """Handle signal injection every inject_freq batches.
+        
+        This method is called after each training batch. Every inject_freq batches,
+        it replaces some Label 1 (polluted background) samples with real signal jets.
+        """
+        self.batch_count += 1
+        
+        if self.batch_count % self.inject_freq == 0 and self.injectable_signal_jets is not None:
+            try:
+                print(f"\n[Batch {self.batch_count}] Injecting {self.num_signal_jets} real signal jets into Label 1...")
+                
+                # Note: on_train_batch_end is called AFTER the backward pass, so modifications
+                # here affect the next training iteration. For immediate effect, this callback
+                # should be paired with a custom training loop or DataLoader wrapper.
+                
+                # Extract batch components
+                if isinstance(batch, dict):
+                    part_features = batch.get("part_features")
+                    part_mask = batch.get("part_mask")
+                    jet_type_labels = batch.get("jet_type_labels")
+                else:
+                    # Try to extract from batch - might be a namedtuple or custom object
+                    return
+                
+                if part_features is None or part_mask is None or jet_type_labels is None:
+                    print(f"[Batch {self.batch_count}] Could not extract batch components")
+                    return
+                
+                # Convert to numpy if on GPU/GPU tensors
+                if hasattr(part_features, 'cpu'):
+                    part_features = part_features.cpu().numpy()
+                if hasattr(part_mask, 'cpu'):
+                    part_mask = part_mask.cpu().numpy()
+                if hasattr(jet_type_labels, 'cpu'):
+                    jet_type_labels = jet_type_labels.cpu().numpy()
+                
+                batch_size = len(jet_type_labels)
+                
+                # Find indices of Label 1 samples (polluted background) in the batch
+                label_1_indices = np.where(jet_type_labels == 1)[0]
+                
+                if len(label_1_indices) == 0:
+                    print(f"[Batch {self.batch_count}] No Label 1 samples in batch to replace")
+                    return
+                
+                # Determine number of samples to inject (min of requested and available)
+                n_to_inject = min(self.num_signal_jets, len(label_1_indices))
+                n_available_signal = self.injectable_signal_jets['n_jets_loaded']
+                
+                # Randomly select indices to replace from Label 1 samples
+                np.random.seed(self.batch_count)  # For reproducibility
+                replace_indices = np.random.choice(label_1_indices, size=n_to_inject, replace=False)
+                
+                # Randomly select signal jets to inject
+                signal_indices = np.random.choice(n_available_signal, size=n_to_inject, replace=True)
+                
+                # Get injectable signal data
+                injectable_features = self.injectable_signal_jets['part_features']  # (n_jets, max_particles, n_features)
+                injectable_mask = self.injectable_signal_jets['part_mask']  # (n_jets, max_particles)
+                
+                # Check shape compatibility
+                batch_max_particles = part_features.shape[1]
+                injectable_max_particles = injectable_features.shape[1]
+                
+                # Perform injection: replace selected batch samples with signal jets
+                for batch_idx_to_replace, signal_idx in zip(replace_indices, signal_indices):
+                    # Handle particle dimension mismatch
+                    if injectable_max_particles >= batch_max_particles:
+                        # Trim injectable jet to match batch size
+                        part_features[batch_idx_to_replace, :, :] = injectable_features[
+                            signal_idx, :batch_max_particles, :
+                        ]
+                        part_mask[batch_idx_to_replace, :] = injectable_mask[
+                            signal_idx, :batch_max_particles
+                        ]
+                    else:
+                        # Pad injectable jet to match batch size
+                        part_features[batch_idx_to_replace, :injectable_max_particles, :] = injectable_features[
+                            signal_idx, :, :
+                        ]
+                        part_features[batch_idx_to_replace, injectable_max_particles:, :] = 0.0
+                        part_mask[batch_idx_to_replace, :injectable_max_particles] = injectable_mask[
+                            signal_idx, :
+                        ]
+                        part_mask[batch_idx_to_replace, injectable_max_particles:] = 0
+                    
+                    # Keep label as 1 (signal jets are labeled as 1)
+                    jet_type_labels[batch_idx_to_replace] = 1
+                
+                # Update batch with modified arrays (convert back to tensor if needed)
+                batch["part_features"] = part_features
+                batch["part_mask"] = part_mask
+                batch["jet_type_labels"] = jet_type_labels
+                
+                self.signal_index = (self.signal_index + n_to_inject) % n_available_signal
+                
+                print(f"[Batch {self.batch_count}] ✓ Injected {n_to_inject} real signal jets")
+                print(f"[Batch {self.batch_count}] Replaced indices: {replace_indices}")
+                print(f"[Batch {self.batch_count}] Signal indices used: {signal_indices}")
+                
+            except Exception as e:
+                print(f"[Batch {self.batch_count}] Error during signal injection: {e}")
+                import traceback
+                traceback.print_exc()
+
+
+def load_injectable_signal_jets(signal_path, num_signal_jets, input_features_dict):
+    """Load a small number of signal jets for injection into the training data.
+    
+    This function loads signal jets from an H5 file and prepares them for injection
+    into the training batches during the catastrophic forgetting experiment.
     
     Parameters
     ----------
-    model : BackboneClassificationLightning
-        The model to load weights into
-    ckpt_path : str
-        Path to the checkpoint file
-    strict : bool, optional
-        Whether to strictly enforce that the keys in state_dict match (default: False)
-        When False, allows partial loading with dimension mismatches
+    signal_path : str
+        Path to the signal H5 file (e.g., "sn_25k_SR_train.h5")
+    num_signal_jets : int
+        Number of signal jets to load for injection. If the file has fewer signal
+        jets than requested, all available signal jets are returned.
+    input_features_dict : dict
+        Feature preprocessing dictionary (e.g., {"part_pt": {...}, "part_etarel": {...}, ...})
+    
+    Returns
+    -------
+    dict or None
+        Dictionary containing preprocessed signal jets with the following keys:
+        - 'part_features': np.ndarray of shape (n_signal_jets, max_n_particles, n_features)
+          Preprocessed particle-level features (pt, etarel, phirel, etc.)
+        - 'part_mask': np.ndarray of shape (n_signal_jets, max_n_particles)
+          Binary mask indicating valid particles (1) vs padding (0)
+        - 'labels': np.ndarray of shape (n_signal_jets,)
+          Array of ones (all are signal jets) for verification
+        - 'n_jets_loaded': int
+          Actual number of signal jets loaded
+        - 'feature_names': list
+          Names of features in consistent order
+        - 'max_n_particles': int
+          Maximum number of particles in any jet
+        
+        Returns None if loading fails or no signal jets are found.
+    
+    Notes
+    -----
+    The loaded signal jets are filtered to include only true signal events (label=1).
+    These jets can then be randomly sampled during training to replace weakly labeled
+    events in batches, enabling the model to learn from real signal.
     """
-    print(f"Loading checkpoint from: {ckpt_path}")
-    
-    # Load checkpoint
-    device = next(model.parameters()).device
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-    
-    # Extract state dict
-    if "state_dict" in ckpt:
-        state_dict = ckpt["state_dict"]
-    else:
-        state_dict = ckpt
-    
-    # Filter to only backbone weights
-    backbone_state_dict = {}
-    for key, value in state_dict.items():
-        # Keep only backbone-related keys, skip head/classifier keys
-        if key.startswith("backbone."):
-            # Remove "backbone." prefix for loading into model.backbone
-            new_key = key.replace("backbone.", "")
-            backbone_state_dict[new_key] = value
-        elif key.startswith("module."):
-            # Handle case where weights might be saved with "module." prefix
-            new_key = key.replace("module.", "")
-            if not new_key.startswith("head"):  # Skip head weights
-                backbone_state_dict[new_key] = value
-    
-    # Remove tril keys for backwards compatibility
-    backbone_state_dict = {k: v for k, v in backbone_state_dict.items() if ".tril" not in k}
-    
-    # Get current model state dict
-    current_state_dict = model.backbone.state_dict()
-    
-    # Filter out keys with dimension mismatches
-    compatible_state_dict = {}
-    incompatible_keys = []
-    
-    for key, value in backbone_state_dict.items():
-        if key in current_state_dict:
-            if current_state_dict[key].shape == value.shape:
-                compatible_state_dict[key] = value
+    try:
+        print(f"[load_injectable_signal_jets] Loading signal jets from {signal_path}...")
+        
+        # Load all jets from the signal file
+        # jet_name="both" loads both jets and returns (jet1_features, jet2_features, labels)
+        jet1_features, jet2_features, labels = load_lhco_jets_from_h5(
+            h5_filename=signal_path,
+            feature_dict=input_features_dict,
+            n_jets=None,  # Load all available jets
+            jet_name="both",
+            mom4_format="epxpypz",
+            use_h5_features=True,
+        )
+        
+        # Concatenate both jets along the particle axis to create a combined jet representation
+        # jet1_features and jet2_features are both awkward arrays with structure (n_events, n_particles, n_features)
+        # We concatenate them along the particle axis: (n_events, n_particles_jet1 + n_particles_jet2, n_features)
+        preprocessed_features = ak.concatenate([jet1_features, jet2_features], axis=1)
+        
+        # Filter to keep only signal jets (label=1)
+        signal_mask = labels == 1
+        signal_features = preprocessed_features[signal_mask]
+        signal_labels = labels[signal_mask]
+        
+        n_signal_available = len(signal_labels)
+        n_to_load = min(num_signal_jets, n_signal_available)
+        
+        print(f"[load_injectable_signal_jets] Found {n_signal_available} signal jets in {signal_path}")
+        print(f"[load_injectable_signal_jets] Loading {n_to_load} signal jets for injection")
+        
+        if n_to_load == 0:
+            if num_signal_jets == 0:
+                print(f"[load_injectable_signal_jets] Using baseline (no signal injection requested)")
             else:
-                incompatible_keys.append(
-                    f"{key}: checkpoint shape {value.shape} vs model shape {current_state_dict[key].shape}"
-                )
-        else:
-            # Key exists in checkpoint but not in current model
-            incompatible_keys.append(f"{key}: not found in current model")
+                print(f"[load_injectable_signal_jets] Warning: No signal jets found in {signal_path}")
+            return None
+        
+        # Select the first n_to_load signal jets
+        selected_features = signal_features[:n_to_load]
+        selected_labels = signal_labels[:n_to_load]
+        
+        # Convert awkward arrays to padded numpy arrays
+        
+        # Get the maximum number of particles across all selected jets
+        n_particles_per_jet = ak.count(selected_features, axis=1)
+        max_n_particles = int(ak.max(n_particles_per_jet))
+        
+        print(f"[load_injectable_signal_jets] Max particles per jet: {max_n_particles}")
+        
+        # Create placeholder for padded features
+        n_features = len(input_features_dict)  # Number of feature types
+        padded_features = np.zeros((n_to_load, max_n_particles, n_features), dtype=np.float32)
+        padded_mask = np.zeros((n_to_load, max_n_particles), dtype=np.int32)
+        
+        # Get feature names in consistent order
+        feature_names = sorted(input_features_dict.keys())
+        
+        # Fill the padded arrays
+        for jet_idx in range(n_to_load):
+            jet_features = selected_features[jet_idx]
+            n_particles_in_jet = len(jet_features)
+            
+            # Fill features for valid particles
+            for feat_idx, feat_name in enumerate(feature_names):
+                try:
+                    padded_features[jet_idx, :n_particles_in_jet, feat_idx] = np.array(
+                        jet_features[feat_name], dtype=np.float32
+                    )
+                except Exception as e:
+                    print(f"[load_injectable_signal_jets] Warning: Could not load feature {feat_name}: {e}")
+            
+            # Set mask for valid particles
+            padded_mask[jet_idx, :n_particles_in_jet] = 1
+        
+        injectable_jets = {
+            'part_features': padded_features,  # (n_jets, max_particles, n_features)
+            'part_mask': padded_mask,  # (n_jets, max_particles)
+            'labels': np.ones(n_to_load, dtype=np.int32),  # All signal jets
+            'n_jets_loaded': n_to_load,
+            'feature_names': feature_names,
+            'max_n_particles': max_n_particles,
+        }
+        
+        print(f"[load_injectable_signal_jets] Successfully loaded {n_to_load} signal jets")
+        return injectable_jets
+        
+    except Exception as e:
+        print(f"[load_injectable_signal_jets] Error loading injectable signal jets: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
     
-    print(f"\nLoading {len(compatible_state_dict)}/{len(backbone_state_dict)} compatible backbone parameters")
-    print(f"Sample compatible keys: {list(compatible_state_dict.keys())[:5]}")
     
-    if incompatible_keys:
-        print(f"\n⚠️  Found {len(incompatible_keys)} incompatible parameters (will be randomly initialized):")
-        for key in incompatible_keys[:10]:
-            print(f"  - {key}")
-        if len(incompatible_keys) > 10:
-            print(f"  ... and {len(incompatible_keys) - 10} more")
-    
-    # Load the compatible weights
-    missing_keys, unexpected_keys = model.backbone.load_state_dict(compatible_state_dict, strict=False)
-    
-    if missing_keys:
-        print(f"\n📝 Missing keys ({len(missing_keys)}) - these will remain randomly initialized:")
-        for key in missing_keys[:10]:
-            print(f"  - {key}")
-        if len(missing_keys) > 10:
-            print(f"  ... and {len(missing_keys) - 10} more")
-    
-    print("\n✓ Backbone weights loaded successfully!")
-    print("  - Transformer blocks: loaded from checkpoint")
-    print("  - Input/output projections: may be randomly initialized due to feature dimension differences")
-    print("  - Classification head: randomly initialized (2 classes for LHCO vs 10 classes in checkpoint)")
-
-
-
 
 def main():
-    parser = argparse.ArgumentParser(description="OmniJet-alpha Anomaly Detection Training Script")
+    parser = argparse.ArgumentParser(description="OmniJet-alpha catastrophic forgetting script")
     parser.add_argument("--dataset_path", default=str(os.getenv("DATASET_PATH")), type=str, help="Path to the LHCO dataset")
     parser.add_argument("--gpu_id", type=int, default=int(os.getenv("GPU_ID")), help="GPU ID to use for computation")
     parser.add_argument("--seed", type=int, default=int(os.getenv("SEED")), help="Random seed for reproducibility")
     parser.add_argument("--jet_name", type=str, default=str(os.getenv("JET_NAME")), choices=["jet1", "jet2", "both"], help="Name of the jet to use from the dataset")
     parser.add_argument("--merge_strategy", type=str, default=str(os.getenv("MERGE_STRATEGY")), choices=["concat", "average", "weighted_sum", "attention"], help="Merge strategy for dijet model")
     parser.add_argument("--batch_size", type=int, default=int(os.getenv("BATCH_SIZE")), help="Batch size for training")
-    parser.add_argument("--max_steps", type=int, default=int(os.getenv("MAX_STEPS")), help="Maximum number of training steps")
+    parser.add_argument("--max_epochs", type=int, default=1, help="Maximum number of training epochs")
     parser.add_argument("--learning_rate", type=float, default=float(os.getenv("LEARNING_RATE")), help="Learning rate")
     parser.add_argument("--train_val_split", type=float, default=float(os.getenv("TRAIN_VAL_SPLIT")), help="Train/validation split ratio")
-    parser.add_argument("--n_jets_train", type=list, default=list(map(int,os.getenv("N_JETS_TRAIN_CUSTOM_AACHEN").strip('[]').split(','))), help="Number of jets per class for training [signal, supp, background]")
     parser.add_argument("--embedding_dim", type=int, default=int(os.getenv("EMBEDDING_DIM")), help="Embedding dimension")
     parser.add_argument("--naming_identifier", type=str, default="", help="Optional identifier to add to the run name for easier tracking")
     parser.add_argument("--log_dir", type=str, default=str(os.getenv("LOG_DIR_AACHEN")), help="Directory for experiment logs")
-    parser.add_argument("--pretrained_ckpt", type=str, help="Path to pre-trained checkpoint")
-    parser.add_argument("--load_pretrained", action="store_true", help="Load pre-trained backbone weights from checkpoint")
     parser.add_argument("--use_class_weights", type=lambda x: x.lower() == 'true', default=True, help="Use automatic class weighting for imbalanced data (default: True)")
+    
+    # Signal injection parameters for catastrophic forgetting
+    parser.add_argument("--inject_freq", type=int, default=10, help="Inject signal jets every N batches (catastrophic forgetting experiment)")
+    parser.add_argument("--num_signal_jets", type=int, default=0, help="Number of signal jets to inject into label 1 on injection batches")
 
     # W&B arguments
     parser.add_argument("--use_wandb", action="store_true", help="Enable Weights & Biases logging")
-    parser.add_argument("--wandb_project", type=str, default="anomaly-detection-lhco", help="W&B project name")
+    parser.add_argument("--wandb_project", type=str, default="catastrophic-forgetting", help="W&B project name")
     parser.add_argument("--wandb_entity", type=str, default=None, help="W&B entity/team name (optional)")
     parser.add_argument("--wandb_run_name", type=str, default=None, help="W&B run name (optional, auto-generated if not provided)")
-    
-    # Catastrophic Forgetting Study arguments
-    parser.add_argument("--study_catastrophic_forgetting", action="store_true", 
-                       help="Enable catastrophic forgetting study with golden batch injection")
-    parser.add_argument("--golden_injection_step", type=int, default=100,
-                       help="Step at which to inject golden batch (default: 100)")
-    parser.add_argument("--signal_test_path", type=str, default=None,
-                       help="Path to test signal H5 file (e.g., sn_50k_SR_test.h5) for tracking set")
-    parser.add_argument("--bg_test_path", type=str, default=None,
-                       help="Path to test background H5 file (e.g., bg_200k_SR_test.h5) for tracking set")
-    parser.add_argument("--tracking_set_size", type=int, default=100,
-                       help="Number of signal and background jets in tracking set (default: 100 each)")
     
     args = parser.parse_args()
 
@@ -913,20 +1021,29 @@ def main():
     # 2. Load Data
     # ============================================================
 
+    n_jets_train = [100, 10000, 20000]               # [signal, supp, background]
+    n_jets_train_artificial = [1, 10000, 20000]       # [signal, supp, background]
+    n_jets_test = [1000, 1000]                          # [signal, background]
+    injection_signal_jets = 25000  # Number of real signal jets to inject into label 1 during training
+
     input_features_dict = {
         "part_pt": {"multiply_by": 1, "subtract_by": 1.8, "func": "signed_log", "inv_func": "signed_exp"},
         "part_etarel": {"multiply_by": 3},
         "part_phirel": {"multiply_by": 3}
     }
 
+    # Loading the full training dataset (signal + polluted background + clean background)
     signal_path = os.path.join(args.dataset_path, "sn_25k_SR_train.h5")
     supp_background_path = os.path.join(args.dataset_path, "bg_100k_SR_supp.h5")
     background_path = os.path.join(args.dataset_path, "bg_200k_SR_train.h5")
-    
     h5_files_all = [signal_path, supp_background_path, background_path]
-    print("n_jets_train:", args.n_jets_train)
+    print("n_jets_train:",  n_jets_train)
     print("Using Jet:", args.jet_name)
 
+    # Loading the test dataset (separate signal and background files)
+    test_signal_path = os.path.join(args.dataset_path, "sn_50k_SR_test.h5")
+    test_background_path = os.path.join(args.dataset_path, "bg_200k_SR_test.h5")
+    h5_files_test = [test_signal_path, test_background_path]
 
     # Log data configuration
     data_config = {
@@ -934,7 +1051,11 @@ def main():
         "signal_file": signal_path,
         "supp_background_file": supp_background_path,
         "background_file": background_path,
-        "n_jets_train": args.n_jets_train,
+        "n_jets_train_full": n_jets_train,
+        "n_jets_train_artificial": n_jets_train_artificial,
+        "training_strategy": "Catastrophic Forgetting with Signal Injection",
+        "training_composition": f"n_jets_train_artificial={n_jets_train_artificial} (minimal signal for initial training)",
+        "validation_composition": f"n_jets_train={n_jets_train} (full signal count for validation)",
         "batch_size": args.batch_size,
         "max_sequence_len": 128,
         "mom4_format": "epxpypz",
@@ -943,6 +1064,12 @@ def main():
         "feature_preprocessing": input_features_dict,
         "shuffle_train": True,
         "jet_name": args.jet_name,
+        "signal_injection_enabled": True,
+        "signal_injection_schedule": f"Inject {args.num_signal_jets} real signal jets every {args.inject_freq} batches",
+        "inject_signal_every_n_batches": args.inject_freq,
+        "num_signal_jets_per_injection": args.num_signal_jets,
+        "initial_signal_count": n_jets_train_artificial[0],
+        "full_signal_count": n_jets_train[0],
     }
     
     train_loader, val_loader = create_custom_lhco_h5_dataloaders(
@@ -950,7 +1077,7 @@ def main():
         h5_files_val=None,
         feature_dict=input_features_dict,
         batch_size=args.batch_size,
-        n_jets_train=args.n_jets_train,  # [signal, background]
+        n_jets_train=n_jets_train,  # [signal, supp, background]
         max_sequence_len=128,
         mom4_format="epxpypz",
         jet_name=args.jet_name,
@@ -959,43 +1086,31 @@ def main():
         num_workers=1,
     )
 
-    # Load golden batch and tracking set for catastrophic forgetting study
-    golden_batch = None
-    tracking_set = None
-    if args.study_catastrophic_forgetting:
-        golden_batch = load_golden_batch(
-            signal_path=signal_path,
-            supp_bg_path=supp_background_path,
-            feature_dict=input_features_dict,
-            batch_size=args.batch_size,
-            n_signal=args.batch_size // 2,
-            n_background=args.batch_size // 2,
-            max_sequence_len=128,
-            mom4_format="epxpypz",
-            jet_name=args.jet_name,
-        )
-        
-        # Validate test paths
-        if args.signal_test_path is None or args.bg_test_path is None:
-            raise ValueError("For catastrophic forgetting study, must provide --signal_test_path and --bg_test_path")
-        
-        tracking_set = load_tracking_set(
-            signal_test_path=args.signal_test_path,
-            bg_test_path=args.bg_test_path,
-            feature_dict=input_features_dict,
-            n_signal=args.tracking_set_size,
-            n_background=args.tracking_set_size,
-            max_sequence_len=128,
-            mom4_format="epxpypz",
-            jet_name=args.jet_name,
-        )
-        
-        # Update data config with study info
-        data_config["catastrophic_forgetting_study"] = {
-            "enabled": True,
-            "golden_batch_injection_step": args.golden_injection_step,
-            "tracking_set_size": args.tracking_set_size + args.tracking_set_size,
-        }
+    train_loader_artificial, val_loader_artificial = create_custom_lhco_h5_dataloaders(
+        h5_files_train=h5_files_all,
+        h5_files_val=None,
+        feature_dict=input_features_dict,
+        batch_size=args.batch_size,
+        n_jets_train=n_jets_train_artificial,  # [signal, supp, background]
+        max_sequence_len=128,
+        mom4_format="epxpypz",
+        jet_name=args.jet_name,
+        train_val_split=args.train_val_split,
+        shuffle_train=True,
+        num_workers=1,
+    )
+
+    test_loader = create_lhco_h5_test_loader(
+        h5_files_test=h5_files_test,
+        feature_dict=input_features_dict,
+        batch_size=args.batch_size,
+        n_jets_test=n_jets_test,  # [signal, background]
+        max_sequence_len=128,
+        mom4_format="epxpypz",
+        jet_name=args.jet_name,
+        shuffle_test=False,
+        num_workers=1,
+    )
 
     # ============================================================
     # 3. Create Model
@@ -1010,8 +1125,8 @@ def main():
         # Actual label distribution after loading:
         #   - Label 1: signal_real + supp_bg_labeled_as_signal  
         #   - Label 0: background_real
-        n_label_1 = args.n_jets_train[0] + args.n_jets_train[1]  # signal + supp background
-        n_label_0 = args.n_jets_train[2]  # clean background
+        n_label_1 = n_jets_train[0] + n_jets_train[1]  # signal + supp background
+        n_label_0 = n_jets_train[2]  # clean background
         total = n_label_1 + n_label_0
         
         # Weight = total / (n_classes * n_samples_per_class)
@@ -1019,13 +1134,13 @@ def main():
         weight_label_0 = total / (2.0 * n_label_0)  # Weight for class 0 (clean background)
         weight_label_1 = total / (2.0 * n_label_1)  # Weight for class 1 (signal + polluted)
         # PyTorch CrossEntropyLoss expects weights in class order: [weight_for_class_0, weight_for_class_1]
-        class_weights = [weight_label_0, weight_label_1]  # CORRECT ORDER!
+        class_weights = [weight_label_0, weight_label_1]
         
         print(f"\n=== Weak Supervision Label Distribution ===")
         print(f"Label 0 (clean background): {n_label_0} jets → weight={weight_label_0:.4f}")
         print(f"Label 1 (signal + polluted bg): {n_label_1} jets → weight={weight_label_1:.4f}")
-        print(f"  - True signal: {args.n_jets_train[0]}")
-        print(f"  - Polluted background: {args.n_jets_train[1]}")
+        print(f"  - True signal: {n_jets_train[0]}")
+        print(f"  - Polluted background: {n_jets_train[1]}")
         print(f"Weight ratio (Label_1/Label_0): {weight_label_1/weight_label_0:.4f}")
         print(f"Class weights array: {class_weights}\n")
         model_kwargs["class_weights"] = class_weights
@@ -1033,61 +1148,9 @@ def main():
         print("Class weighting disabled - using standard CrossEntropyLoss")
         model_kwargs["class_weights"] = None
 
+
     # For constant learning rate, use ConstantLR
     scheduler_with_params = torch.optim.lr_scheduler.ConstantLR
-    
-    # For cosine annealing, uncomment the following:
-    # scheduler_with_params = partial(
-    #     torch.optim.lr_scheduler.CosineAnnealingLR,
-    #     T_max=args.max_steps,
-    #     eta_min=1e-6, # minimum learning rate
-    # )
-
-    # -------------------------------------------------------------------------
-    # ---------------------- Single Jet Data Model ----------------------------
-    # -------------------------------------------------------------------------
-
-    # Initialize the Backbone + Classification Head
-    # model = BackboneClassificationLightning(
-    #     optimizer=torch.optim.AdamW,
-    #     optimizer_kwargs={
-    #         "lr": args.learning_rate,
-    #         "weight_decay": 1e-2,
-    #     },
-    #     scheduler=scheduler_with_params,
-    #     class_head_type="class_attention",  # other options: "linear_average_pool", "summation", "flatten"
-    #     model_kwargs=model_kwargs,
-    #     use_continuous_input=True,
-    #     scheduler_lightning_kwargs={
-    #         "monitor": "val_argos",
-    #         "mode": "max",
-    #         "interval": "step",
-    #         "frequency": 1,
-    #     },
-    # )
-
-    # -------------------------------------------------------------------------
-    # ------------------------- DiJet Data Model ------------------------------
-    # -------------------------------------------------------------------------
-
-    # model = BackboneDijetClassificationLightning(
-    #     optimizer=torch.optim.AdamW,
-    #     optimizer_kwargs={
-    #         "lr": args.learning_rate,
-    #         "weight_decay": 1e-2,
-    #     },
-    #     scheduler=scheduler_with_params,
-    #     merge_strategy=args.merge_strategy,  # other options: "average", "weighted_sum", "attention"
-    #     class_head_type="class_attention",  # other options: "linear_average_pool", "summation", "flatten"
-    #     model_kwargs=model_kwargs,
-    #     use_continuous_input=True,
-    #     scheduler_lightning_kwargs={
-    #         "monitor": "val_argos",
-    #         "mode": "max",
-    #         "interval": "step",
-    #         "frequency": 1,
-    #     },
-    # )
 
     # -------------------------------------------------------------------------
     # ------------------ Aachen Anomaly Detection Model -----------------------
@@ -1111,30 +1174,21 @@ def main():
         },
     )
 
-    
-    # Load pre-trained backbone weights if requested
-    if args.load_pretrained and args.pretrained_ckpt:
-        print(f"Loading pre-trained backbone weights from: {args.pretrained_ckpt}")
-        load_pretrained_backbone(model, args.pretrained_ckpt)
-        print("Successfully loaded pre-trained backbone weights!")
-
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model created with {num_params:,} parameters")
     
     # Log model configuration
     model_config = {
         "architecture": "BackboneAachenClassificationLightning",
-        "class_head_type": "aachen", #"class_attention",
+        "class_head_type": "aachen",
         "merge_strategy": args.merge_strategy,
         "use_continuous_input": True,
         "num_parameters": num_params,
         "embedding_dim": args.embedding_dim,
-        "n_transformer_blocks": 8,  # Updated to match pre-trained model
+        "n_transformer_blocks": 8,
         "num_attention_heads": 8,
         "max_sequence_len": 128,
         "n_output_classes": 2,
-        "pretrained_checkpoint": args.pretrained_ckpt if args.load_pretrained else None,
-        "load_pretrained": args.load_pretrained,
         "model_kwargs": {k: v for k, v in model_kwargs.items() if k != "particle_features_dict"},
     }
     
@@ -1146,15 +1200,19 @@ def main():
             "weight_decay": 1e-2,
         },
         "scheduler": "ConstantLR",
-        "max_steps": args.max_steps,
+        "max_epochs": 1,
+        "test_roc_logged_per_train_batch": True,
+        "embedding_visualization_per_batch": True,
+        "embedding_visualization_dir": "plots/catastrophic_forgetting",
+        "signal_injection_enabled": True,
+        "signal_injection_freq": args.inject_freq,
+        "num_signal_jets_per_injection": args.num_signal_jets,
         "gradient_clip_val": 1.0,
         "precision": "32",
         "early_stopping_patience": 15,
         "early_stopping_monitor": "val_argos",
         "checkpoint_monitor": "val_argos",
         "checkpoint_mode": "max",
-        "load_pretrained": args.load_pretrained,
-        "pretrained_ckpt": args.pretrained_ckpt,
         "use_class_weights": args.use_class_weights,
         "class_weights": model_kwargs.get("class_weights", None),
     }
@@ -1176,43 +1234,6 @@ def main():
     }
     exp_logger.log_config(full_config)
     print(f"Configuration saved to: {exp_logger.run_dir / 'config.json'}")
-    
-    # # Setup callbacks
-    # checkpoint_callback = ModelCheckpoint(
-    #     dirpath=exp_logger.get_checkpoint_dir(),
-    #     filename="epoch_{epoch:02d}_{val_loss:.4f}",
-    #     monitor="val_loss",
-    #     mode="min",
-    #     save_top_k=3,
-    #     save_last=False,
-    # )
-
-    # Alternatively, monitor AUC instead of loss
-    # checkpoint_callback = ModelCheckpoint(
-    #     dirpath=exp_logger.get_checkpoint_dir(),
-    #     filename="epoch_{epoch:02d}_{val_loss:.4f}",
-    #     monitor="val_loss",
-    #     mode="min",
-    #     save_top_k=3,
-    #     save_last=False,
-    # )
-
-    # Or using ARGOS metric
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=exp_logger.get_checkpoint_dir(),
-        filename="{epoch:02d}_{val_argos:.4f}",
-        monitor="val_argos",
-        mode="max",
-        save_top_k=1,
-        save_last=False,
-    )
-    
-    # Early stopping enabled
-    early_stop_callback = EarlyStopping(
-        monitor="val_argos",
-        patience=30,
-        mode="max",
-    )
 
     # AUC callback: computes ROC AUC on validation set each epoch and logs it
     auc_callback = AUCCallback()
@@ -1220,24 +1241,24 @@ def main():
     # ARGOS callback: computes ARGOS metric on validation set each epoch and logs it
     argos_callback = ARGOSCallback()
 
-    # Latent space tracking callback for catastrophic forgetting study
-    latent_space_callback = None
-    if args.study_catastrophic_forgetting and tracking_set is not None:
-        print(f"\n{'='*80}")
-        print(f"Catastrophic Forgetting Study ENABLED")
-        print(f"  Golden batch injection at step: {args.golden_injection_step}")
-        print(f"  Tracking set size: {2 * args.tracking_set_size} jets (signal + background)")
-        print(f"{'='*80}\n")
-        
-        latent_space_callback = LatentSpaceCallback(
-            tracking_set=tracking_set,
-            device=device,
-            jet_name=args.jet_name,
-            log_dir=str(exp_logger.run_dir),
-            tracking_steps=[1, args.golden_injection_step - 1, args.golden_injection_step, 
-                           args.golden_injection_step + 1, args.max_steps // 2, args.max_steps],
-            embedding_dim=args.embedding_dim,
-        )
+    # Test ROC callback: computes ROC AUC on test set after each train batch and logs it
+    test_roc_callback = TestROCCallback(test_loader=test_loader)
+
+    # Signal injection callback: injects real signal jets every N batches
+    signal_injection_callback = SignalInjectionCallback(
+        signal_path=signal_path,
+        injection_signal_jets=injection_signal_jets,
+        num_signal_jets=args.num_signal_jets,
+        input_features_dict=input_features_dict,
+        inject_freq=args.inject_freq,
+    )
+
+    # Embedding visualization callback: extract embeddings and plot t-SNE/UMAP after each batch
+    embedding_viz_callback = EmbeddingVisualizationCallback(
+        test_loader=test_loader,
+        output_base_dir="plots/catastrophic_forgetting",
+        log_frequency=1  # Visualize after every batch; set to >1 to reduce frequency
+    )
 
     # Setup W&B logger
     loggers = []
@@ -1268,80 +1289,39 @@ def main():
 
     # Create trainer
     print("Starting training...")
-    
-    # Prepare callbacks list
-    callbacks_list = [checkpoint_callback, auc_callback, argos_callback, early_stop_callback]
-    if latent_space_callback is not None:
-        callbacks_list.append(latent_space_callback)
-    
     # Ensure Lightning uses the GPU requested via --gpu_id.
     # Use explicit accelerator and devices so PL selects the correct device
     # (accelerator="auto", devices=1 will pick the first visible GPU i.e. GPU 0).
     trainer = L.Trainer(
-        max_steps=args.max_steps,
+        max_epochs=1,
         accelerator="gpu",
         devices=[args.gpu_id],
         logger=loggers if loggers else False,
-        callbacks=callbacks_list,
-        log_every_n_steps=20,
+        callbacks=[auc_callback, argos_callback, test_roc_callback, signal_injection_callback], # embedding_viz_callback, early_stop_callback],
+        log_every_n_steps=1,
+        val_check_interval=1,
         gradient_clip_val=1,
         precision="32",
         num_nodes=1,
     )
 
     # ============================================================
-    # 4. Training Loop with Optional Golden Batch Injection
+    # 4. Training Loop
     # ============================================================
-    
-    # Create wrapper to inject golden batch at specific step
-    original_train_loader = train_loader
-    golden_injected = False
-    
-    class GoldenBatchInjector:
-        """Wrapper around train_loader to inject golden batch at step 100."""
-        def __init__(self, loader, golden_batch, injection_step):
-            self.loader = loader
-            self.golden_batch = golden_batch
-            self.injection_step = injection_step
-            self.current_step = 0
-            self.batch_iter = iter(loader)
-        
-        def __iter__(self):
-            self.batch_iter = iter(self.loader)
-            return self
-        
-        def __next__(self):
-            # Inject golden batch at specific step
-            if args.study_catastrophic_forgetting and self.current_step == self.injection_step:
-                print(f"\n{'='*80}")
-                print(f"🟡 INJECTING GOLDEN BATCH at Step {self.current_step}")
-                print(f"{'='*80}\n")
-                self.current_step += 1
-                # Convert golden batch to same format as train batches
-                return self.golden_batch
-            
-            batch = next(self.batch_iter)
-            self.current_step += 1
-            return batch
-    
-    if args.study_catastrophic_forgetting and golden_batch is not None:
-        train_loader = GoldenBatchInjector(original_train_loader, golden_batch, args.golden_injection_step)
+    print("\n" + "="*80)
+    print("TRAINING CONFIGURATION:")
+    print(f"  Train loader: n_jets_train_artificial={n_jets_train_artificial} (minimal signal)")
+    print(f"  Val loader: n_jets_train={n_jets_train} (full signal count)")
+    print(f"  Signal injection: Every {args.inject_freq} batches, inject {args.num_signal_jets} real signal jets")
+    print("="*80 + "\n")
     
     try:
         trainer.fit(
             model=model,
-            train_dataloaders=train_loader,
+            train_dataloaders=train_loader_artificial,
             val_dataloaders=val_loader,
         )
         
-        # Log final results
-        exp_logger.log_final_results(trainer, checkpoint_callback)
-        
-        print("\n" + "=" * 80)
-        print("Training complete!")
-        print(f"Best checkpoint: {checkpoint_callback.best_model_path}")
-        print(f"Best validation loss: {checkpoint_callback.best_model_score:.4f}")
-        print(f"Results saved to: {exp_logger.run_dir}")
         if args.use_wandb:
             print(f"W&B run: {wandb.run.url}")
             wandb.finish()

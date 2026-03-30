@@ -471,6 +471,9 @@ def main():
     parser.add_argument("--wandb_entity", type=str, default=None, help="W&B entity/team name (optional)")
     parser.add_argument("--wandb_run_name", type=str, default=None, help="W&B run name (optional, auto-generated if not provided)")
     
+    # HPC arguments
+    parser.add_argument("--use_hpc", action="store_true", help="Disable progress bar for HPC environments to avoid large log files")
+    
     args = parser.parse_args()
 
     # ============================================================
@@ -801,6 +804,7 @@ def main():
         gradient_clip_val=1,
         precision="32",
         num_nodes=1,
+        enable_progress_bar=not args.use_hpc,
     )
 
     # ============================================================

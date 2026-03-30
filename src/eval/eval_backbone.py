@@ -5,11 +5,14 @@ import argparse
 import numpy as np
 import pickle
 import hashlib
+import logging
+from collections.abc import Mapping
 import matplotlib.pyplot as plt
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
 from sklearn.manifold import TSNE
+from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
 
 try:
@@ -25,9 +28,54 @@ from gabbro.models.backbone import (
     BackboneDijetClassificationLightning,
     BackboneAachenClassificationLightning,
 )
+from gabbro.models.backbone_base import BackboneTransformer
 from gabbro.data.data_utils import create_lhco_h5_test_loader
 
 load_dotenv()
+
+# Setup logging
+logger = logging.getLogger(__name__)
+
+
+def _to_plain_dict(obj):
+    """Convert config-like containers (e.g., DictConfig) to plain dict recursively."""
+    if isinstance(obj, Mapping):
+        return {k: _to_plain_dict(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_to_plain_dict(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_to_plain_dict(v) for v in obj)
+    return obj
+
+
+class AttrDict(dict):
+    """Dict with attribute-style access (obj.key) while keeping dict behavior."""
+
+    def __getattr__(self, key):
+        try:
+            return self[key]
+        except KeyError as exc:
+            raise AttributeError(key) from exc
+
+    def __setattr__(self, key, value):
+        self[key] = value
+
+    def __delattr__(self, key):
+        try:
+            del self[key]
+        except KeyError as exc:
+            raise AttributeError(key) from exc
+
+
+def _to_attrdict(obj):
+    """Recursively convert mappings to AttrDict for cfg objects like embed_cfg."""
+    if isinstance(obj, Mapping):
+        return AttrDict({k: _to_attrdict(v) for k, v in obj.items()})
+    if isinstance(obj, list):
+        return [_to_attrdict(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_to_attrdict(v) for v in obj)
+    return obj
 
 
 class DataCache:
@@ -48,7 +96,7 @@ class DataCache:
         cache_key = self._get_cache_key(h5_files, n_jets, feature_dict, max_sequence_len, model_type)
         file_str = "_".join([Path(f).stem for f in h5_files])
         n_jets_str = "_".join(map(str, n_jets))
-        type_str = "dijet" if model_type in ["dijet", "aachen"] else "single"
+        type_str = "dijet" if model_type in ["dijet", "aachen", "pretrained"] else "single"
         return self.cache_dir / f"data_{type_str}_{file_str}_{n_jets_str}_{cache_key}.pkl"
     
     def load(self, h5_files, n_jets, feature_dict, max_sequence_len, model_type="single"):
@@ -94,7 +142,7 @@ def extract_data_from_loader(dataloader, model_type="single"):
         all_masks.append(batch["part_mask"])
         all_labels.append(batch["jet_type_labels"])
         
-        if model_type in ["dijet", "aachen"] and "part_features_jet2" in batch:
+        if model_type in ["dijet", "aachen", "pretrained"] and "part_features_jet2" in batch:
             all_features_jet2.append(batch["part_features_jet2"])
             all_masks_jet2.append(batch["part_mask_jet2"])
         
@@ -107,7 +155,7 @@ def extract_data_from_loader(dataloader, model_type="single"):
         "labels": torch.cat(all_labels, dim=0),
     }
     
-    if model_type in ["dijet", "aachen"] and all_features_jet2:
+    if model_type in ["dijet", "aachen", "pretrained"] and all_features_jet2:
         result["features_jet2"] = torch.cat(all_features_jet2, dim=0)
         result["masks_jet2"] = torch.cat(all_masks_jet2, dim=0)
     
@@ -116,7 +164,7 @@ def extract_data_from_loader(dataloader, model_type="single"):
 
 def create_loader_from_cached_data(cached_data, batch_size, model_type="single"):
     """Create a DataLoader from cached tensor data."""
-    if model_type in ["dijet", "aachen"]:
+    if model_type in ["dijet", "aachen", "pretrained"]:
         class DijetCachedDataset(torch.utils.data.Dataset):
             def __init__(self, features, features_jet2, masks, masks_jet2, labels):
                 self.features = features
@@ -182,7 +230,20 @@ class EmbeddingExtractor:
     """Extract and visualize embeddings from trained model."""
     
     def __init__(self, checkpoint_path, gpu_id, model_type="single", output_dir="plots"):
-        """Initialize extractor."""
+        """Initialize extractor.
+        
+        Parameters
+        ----------
+        checkpoint_path : str
+            Path to model checkpoint
+        gpu_id : int
+            GPU device ID
+        model_type : str
+            Model architecture type: 'single', 'dijet', 'aachen', or 'pretrained'
+            'pretrained' loads BackboneTransformer directly
+        output_dir : str
+            Directory to save plots
+        """
         self.checkpoint_path = checkpoint_path
         self.model_type = model_type.lower()
         self.output_dir = Path(output_dir)
@@ -190,12 +251,161 @@ class EmbeddingExtractor:
         
         # Load model
         print(f"Loading {model_type} model...")
-        if self.model_type == "dijet":
-            self.model = BackboneDijetClassificationLightning.load_from_checkpoint(checkpoint_path, map_location='cpu')
-        elif self.model_type == "aachen":
-            self.model = BackboneAachenClassificationLightning.load_from_checkpoint(checkpoint_path, map_location='cpu')
+        if self.model_type == "pretrained":
+            # Load BackboneTransformer directly from checkpoint (Lightning or extracted)
+            print("Loading BackboneTransformer from checkpoint...")
+            ckpt = torch.load(checkpoint_path, map_location='cpu')
+            
+            # Handle both Lightning and extracted backbone formats
+            if isinstance(ckpt, dict) and 'state_dict' in ckpt:
+                state_dict = ckpt['state_dict']
+                
+                # Try to get hyperparameters from multiple possible locations
+                hparams = ckpt.get('hyper_parameters', {})
+                if not hparams:
+                    hparams = ckpt.get('hparams', {})
+                if not hparams:
+                    hparams = ckpt.get('hparams_dict', {})
+                if isinstance(hparams, Mapping):
+                    hparams = _to_plain_dict(hparams)
+                
+                # Handle nested backbone_cfg (in case checkpoint was saved with nested structure)
+                if hparams and 'backbone_cfg' in hparams and 'embedding_dim' not in hparams:
+                    print("Warning: Detected nested backbone_cfg. Extracting flattened config...")
+                    if isinstance(hparams['backbone_cfg'], Mapping):
+                        hparams = _to_plain_dict(hparams['backbone_cfg'])
+                        print(f"✓ Extracted backbone_cfg with {len(hparams)} parameters")
+                
+                # Also check model_kwargs nesting
+                if hparams and 'model_kwargs' in hparams and 'embedding_dim' not in hparams:
+                    model_kwargs = hparams.get('model_kwargs', {})
+                    if isinstance(model_kwargs, Mapping) and 'backbone_cfg' in model_kwargs:
+                        print("Warning: Detected nested model_kwargs.backbone_cfg. Extracting...")
+                        hparams = _to_plain_dict(model_kwargs['backbone_cfg'])
+                        print(f"✓ Extracted backbone_cfg with {len(hparams)} parameters")
+                
+                # Extract backbone state dict (remove 'backbone.' prefix if present)
+                backbone_state = {}
+                for k, v in state_dict.items():
+                    if k.startswith('backbone.'):
+                        new_key = k.replace('backbone.', '', 1)
+                        backbone_state[new_key] = v
+                    else:
+                        # Already a backbone state dict (from extraction)
+                        backbone_state[k] = v
+                
+                if not backbone_state:
+                    raise ValueError("Checkpoint has empty state_dict")
+                
+                # Create BackboneTransformer with hyperparameters
+                if not hparams:
+                    # Fallback: Load as Lightning module, then extract backbone
+                    print("\nWarning: Checkpoint missing hyperparameters.")
+                    print("Loading full Lightning module and extracting backbone...")
+                    try:
+                        # Try loading as single jet model (most common)
+                        temp_model = BackboneClassificationLightning.load_from_checkpoint(
+                            checkpoint_path, map_location='cpu'
+                        )
+                        # Get backbone from the loaded model
+                        self.model = temp_model.backbone
+                        print("✓ Extracted backbone from Lightning module")
+                    except Exception as e:
+                        # Fallback: Load state_dict directly and try to infer model type
+                        print(f"Lightning load failed ({type(e).__name__}), trying direct state_dict load...")
+                        try:
+                            # Load state_dict directly
+                            ckpt_raw = torch.load(checkpoint_path, map_location='cpu')
+                            state_dict_raw = ckpt_raw.get('state_dict', ckpt_raw)
+                            
+                            # Try different Lightning module types
+                            model_types_to_try = [
+                                ('single', BackboneClassificationLightning),
+                                ('dijet', BackboneDijetClassificationLightning),
+                                ('aachen', BackboneAachenClassificationLightning),
+                            ]
+                            
+                            loaded = False
+                            for model_name, ModelClass in model_types_to_try:
+                                try:
+                                    # Create model and load state_dict
+                                    temp_model = ModelClass()
+                                    temp_model.load_state_dict(state_dict_raw, strict=False)
+                                    self.model = temp_model.backbone
+                                    print(f"✓ Extracted backbone from {model_name} Lightning module")
+                                    loaded = True
+                                    break
+                                except Exception:
+                                    continue
+                            
+                            if not loaded:
+                                raise RuntimeError(
+                                    "Could not load checkpoint as any Lightning model type "
+                                    "(single/dijet/aachen)"
+                                )
+                        except Exception as e2:
+                            logger.error("=" * 80)
+                            logger.error("ERROR: Could not load checkpoint!")
+                            logger.error("=" * 80)
+                            logger.error(f"\nOriginal error: {e}")
+                            logger.error(f"Fallback error: {e2}")
+                            logger.error("\nTo use this checkpoint, you can:")
+                            logger.error("\n  Option 1: Use the full Lightning module (specify correct type)")
+                            logger.error(f"     python -m src.eval.eval_backbone \\")
+                            logger.error(f"       --checkpoint {checkpoint_path} \\")
+                            logger.error(f"       --model_type single  # or dijet/aachen if applicable")
+                            logger.error("\n  Option 2: Extract backbone weights first (for transfer learning)")
+                            logger.error(f"     python -m src.eval.extract_backbone \\")
+                            logger.error(f"       --checkpoint {checkpoint_path} \\")
+                            logger.error(f"       --output_name my_backbone \\")
+                            logger.error(f"       --verify --metadata")
+                            logger.error("\n     Then use:")
+                            logger.error(f"     python -m src.eval.eval_backbone \\")
+                            logger.error(f"       --checkpoint backbone_weights/my_backbone/backbone.pt \\")
+                            logger.error(f"       --model_type pretrained")
+                            logger.error("=" * 80 + "\n")
+                            raise
+                else:
+                    print(f"Instantiating BackboneTransformer with {len(hparams)} hyperparameters...")
+                    print(f"Hyperparameters keys: {list(hparams.keys())}")
+                    try:
+                        # BackboneTransformer expects cfg objects with attribute access (e.g. embed_cfg.type).
+                        hparams_for_model = _to_attrdict(hparams)
+                        self.model = BackboneTransformer(**hparams_for_model)
+                    except TypeError as e:
+                        print(f"\nError: {e}")
+                        print(f"\nAvailable hparams ({len(hparams)} total):")
+                        for k, v in hparams.items():
+                            print(f"  {k}: {type(v).__name__}")
+                        
+                        # Try to reconstruct hparams if they're nested
+                        if isinstance(hparams, dict):
+                            # Check if hparams are nested (e.g., from a config object)
+                            for k, v in list(hparams.items())[:5]:
+                                if isinstance(v, dict):
+                                    print(f"\nNote: '{k}' appears to be a nested dict. Checking contents...")
+                                    for subk, subv in v.items():
+                                        print(f"  {k}.{subk}: {type(subv).__name__}")
+                        
+                        raise ValueError(
+                            f"Missing required hyperparameters for BackboneTransformer. "
+                            f"Expected 'embedding_dim' and other parameters, but got: {list(hparams.keys())}"
+                        )
+                    self.model.load_state_dict(backbone_state)
+                    print(f"✓ Loaded {len(backbone_state)} backbone weight tensors")
+            else:
+                raise ValueError(
+                    f"Checkpoint must contain 'state_dict' key. "
+                    f"Found keys: {list(ckpt.keys()) if isinstance(ckpt, dict) else type(ckpt)}"
+                )
         else:
-            self.model = BackboneClassificationLightning.load_from_checkpoint(checkpoint_path, map_location='cpu')
+            # Load Lightning modules
+            if self.model_type == "dijet":
+                self.model = BackboneDijetClassificationLightning.load_from_checkpoint(checkpoint_path, map_location='cpu')
+            elif self.model_type == "aachen":
+                self.model = BackboneAachenClassificationLightning.load_from_checkpoint(checkpoint_path, map_location='cpu')
+            else:
+                self.model = BackboneClassificationLightning.load_from_checkpoint(checkpoint_path, map_location='cpu')
         
         self.model.eval()
         
@@ -221,7 +431,31 @@ class EmbeddingExtractor:
             for batch_idx, batch in enumerate(dataloader):
                 labels = batch["jet_type_labels"]
                 
-                if self.model_type in ["dijet", "aachen"]:
+                if self.model_type == "pretrained":
+                    # BackboneTransformer with both jets - called directly (not via .backbone())
+                    X1 = batch["part_features"].to(self.device)
+                    X2 = batch["part_features_jet2"].to(self.device)
+                    mask1 = batch["part_mask"].to(self.device)
+                    mask2 = batch["part_mask_jet2"].to(self.device)
+                    
+                    emb1 = self.model(X1, mask1)
+                    emb2 = self.model(X2, mask2)
+                    
+                    mask1_bool = mask1.bool()
+                    mask2_bool = mask2.bool()
+                    
+                    emb1_masked = emb1 * mask1_bool.unsqueeze(-1)
+                    emb1_sum = emb1_masked.sum(dim=1)
+                    valid_count1 = mask1_bool.sum(dim=1, keepdim=True).clamp(min=1)
+                    emb1_pooled = emb1_sum / valid_count1
+                    
+                    emb2_masked = emb2 * mask2_bool.unsqueeze(-1)
+                    emb2_sum = emb2_masked.sum(dim=1)
+                    valid_count2 = mask2_bool.sum(dim=1, keepdim=True).clamp(min=1)
+                    emb2_pooled = emb2_sum / valid_count2
+                    
+                    embeddings = torch.cat([emb1_pooled, emb2_pooled], dim=1)
+                elif self.model_type in ["dijet", "aachen"]:
                     X1 = batch["part_features"].to(self.device)
                     X2 = batch["part_features_jet2"].to(self.device)
                     mask1 = batch["part_mask"].to(self.device)
@@ -245,6 +479,7 @@ class EmbeddingExtractor:
                     
                     embeddings = torch.cat([emb1_pooled, emb2_pooled], dim=1)
                 else:
+                    # Single jet (default)
                     X = batch["part_features"].to(self.device)
                     mask = batch["part_mask"].to(self.device)
                     
@@ -273,7 +508,7 @@ class EmbeddingExtractor:
         scaler = StandardScaler()
         embeddings_scaled = scaler.fit_transform(embeddings)
         
-        tsne = TSNE(n_components=2, perplexity=perplexity, n_iter=1000, 
+        tsne = TSNE(n_components=2, perplexity=perplexity, max_iter=1000, 
                     random_state=42, n_jobs=-1, verbose=1)
         embeddings_tsne = tsne.fit_transform(embeddings_scaled)
         
@@ -335,8 +570,32 @@ class EmbeddingExtractor:
     
     def visualize(self, test_loader):
         """Extract and visualize embeddings."""
-        print("\nExtracting embeddings...")
         embeddings, labels = self.extract_embeddings(test_loader)
+
+        # Compute silhouette score on standardized embeddings and save to text file.
+        silhouette_path = self.output_dir / 'silhouette_score.txt'
+        silhouette_value = None
+        unique_labels = np.unique(labels)
+        if len(unique_labels) < 2 or len(labels) <= len(unique_labels):
+            message = (
+                "Silhouette Score: N/A\n"
+                "Reason: Need at least 2 clusters and more samples than number of clusters.\n"
+            )
+        else:
+            try:
+                embeddings_scaled = StandardScaler().fit_transform(embeddings)
+                silhouette_value = silhouette_score(embeddings_scaled, labels)
+                message = f"Silhouette Score: {silhouette_value:.6f}\n"
+            except Exception as e:
+                message = f"Silhouette Score: N/A\nReason: {e}\n"
+
+        with open(silhouette_path, 'w') as f:
+            f.write(message)
+
+        if silhouette_value is not None:
+            print(f"Saved silhouette score: {silhouette_value:.6f} -> {silhouette_path}")
+        else:
+            print(f"Saved silhouette score info -> {silhouette_path}")
         
         print("\nGenerating plots...")
         self.plot_tsne(embeddings, labels)
@@ -350,7 +609,7 @@ def main():
     parser.add_argument("--checkpoint", type=str, required=True, 
                        help="Path to model checkpoint")
     parser.add_argument("--model_type", type=str, required=True,
-                       choices=["single", "dijet", "aachen"],
+                       choices=["single", "dijet", "aachen", "pretrained"],
                        help="Model architecture type")
     parser.add_argument("--dataset_path", type=str, 
                        default=os.getenv("DATASET_PATH"),
@@ -388,8 +647,8 @@ def main():
     background_path = os.path.join(args.dataset_path, "bg_200k_SR_test.h5")
     h5_files_test = [signal_path, background_path]
     
-    # Determine jet_name
-    jet_name = "both" if args.model_type in ["dijet", "aachen"] else "jet1"
+    # Determine jet_name (pretrained and dijet/aachen use both jets)
+    jet_name = "both" if args.model_type in ["dijet", "aachen", "pretrained"] else "jet1"
     
     # Initialize cache
     cache = DataCache(cache_dir=".cache/evaluation")

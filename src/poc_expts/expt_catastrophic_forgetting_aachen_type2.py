@@ -547,78 +547,6 @@ class EmbeddingVisualizationCallback(Callback):
 
         print(f"  Plots saved to: {batch_dir}")
 
-class ARGOSCallback(Callback):
-    """Compute ARGOS metric on the validation set at the end of each validation epoch.
-    ARGOS is defined as: max(tpr/sqrt(fpr) - sqrt(tpr)) for fpr > 0.
-    """
-
-    def on_validation_epoch_end(self, trainer, pl_module):
-        # Get validation dataloader
-        try:
-            val_loaders = trainer.val_dataloaders
-        except Exception:
-            val_loaders = None
-        if not val_loaders:
-            return
-
-        # Handle both single DataLoader and list of DataLoaders
-        if isinstance(val_loaders, list):
-            val_loader = val_loaders[0]
-        else:
-            val_loader = val_loaders
-            
-        device = pl_module.device if hasattr(pl_module, 'device') else (torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu'))
-
-        all_preds = []
-        all_labels = []
-
-        pl_module.eval()
-        with torch.no_grad():
-            for batch in val_loader:
-                labels = batch["jet_type_labels"].to(device)
-                
-                # Check if model is dijet or single-jet
-                if isinstance(pl_module, BackboneAachenClassificationLightning):
-                    X1 = batch["part_features"].to(device)
-                    X2 = batch["part_features_jet2"].to(device)
-                    mask1 = batch["part_mask"].to(device)
-                    mask2 = batch["part_mask_jet2"].to(device)
-                    logits = pl_module(X1, mask1, X2, mask2)
-                else:
-                    X = batch["part_features"].to(device)
-                    mask = batch["part_mask"].to(device)
-                    logits = pl_module(X, mask)
-
-                # Handle different logit shapes
-                if logits.dim() == 1:
-                    # Binary classification with single logit (BCEWithLogitsLoss)
-                    probs = torch.sigmoid(logits).cpu().numpy()
-                else:
-                    # Multi-class with softmax
-                    probs = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
-                all_preds.append(probs)
-                all_labels.append(labels.cpu().numpy())
-
-        if len(all_preds) == 0:
-            return
-
-        y_pred = np.concatenate(all_preds)
-        y_true = np.concatenate(all_labels)
-
-        # Compute ARGOS metric
-        try:
-            fpr, tpr, thresholds = roc_curve(y_true, y_pred)
-            inds = np.nonzero(fpr)
-            tpr = tpr[inds]
-            fpr = fpr[inds]
-            argos = float(np.max(tpr/np.sqrt(fpr) - np.sqrt(tpr)))
-        except Exception:
-            argos = float('nan')
-
-        # Log the metric
-        pl_module.log("val_argos", argos, prog_bar=True, logger=True)
-
-
 class TestROCCallback(Callback):
     """Compute ROC AUC on the test set after each training batch and log it.
 
@@ -682,295 +610,51 @@ class TestROCCallback(Callback):
         pl_module.log("test_roc", test_roc, on_step=True, on_epoch=False, logger=True, prog_bar=False)
 
 
-class SignalInjectionCallback(Callback):
-    """Inject real signal jets into training data every N batches.
-    
-    This callback implements the catastrophic forgetting experiment by:
-    1. Starting training with minimal signal (n_jets_train_artificial=[1, ...])
-    2. After every inject_freq batches, injecting real signal jets (--num_signal_jets)
-       loaded via load_injectable_signal_jets()
-    3. Replacing Label 1 (polluted background) samples with injected signal samples
-    
-    This tests if the model can recognize real signal despite initial weak supervision.
-    """
-    
-    def __init__(self, signal_path, injection_signal_jets, num_signal_jets, input_features_dict, inject_freq=10):
-        """Initialize the signal injection callback.
-        
-        Parameters
-        ----------
-        signal_path : str
-            Path to the signal H5 file
-        num_signal_jets : int
-            Number of signal jets to inject per injection event
-        input_features_dict : dict
-            Feature preprocessing dictionary
-        inject_freq : int
-            Inject signal every N batches
-        """
-        self.signal_path = signal_path
-        self.injection_signal_jets = injection_signal_jets
-        self.num_signal_jets = num_signal_jets
-        self.input_features_dict = input_features_dict
-        self.inject_freq = inject_freq
-        self.batch_count = 0
-        self.injectable_signal_jets = None
-        self.signal_index = 0
-        
-    def on_train_start(self, trainer, pl_module):
-        """Load injectable signal jets at the start of training."""
-        print(f"\n[SignalInjectionCallback] Loading injectable signal jets from {self.signal_path}...")
-        try:
-            self.injectable_signal_jets = load_injectable_signal_jets(
-                self.signal_path, 
-                self.injection_signal_jets,
-                self.input_features_dict
-            )
-            print(f"[SignalInjectionCallback] Loaded signal jets for injection.")
-        except Exception as e:
-            print(f"[SignalInjectionCallback] Warning: Failed to load injectable signal jets: {e}")
-            self.injectable_signal_jets = None
-    
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        """Handle signal injection every inject_freq batches.
-        
-        This method is called after each training batch. Every inject_freq batches,
-        it replaces some Label 1 (polluted background) samples with real signal jets.
-        """
-        self.batch_count += 1
-        
-        if self.batch_count % self.inject_freq == 0 and self.injectable_signal_jets is not None:
-            try:
-                print(f"\n[Batch {self.batch_count}] Injecting {self.num_signal_jets} real signal jets into Label 1...")
-                
-                # Note: on_train_batch_end is called AFTER the backward pass, so modifications
-                # here affect the next training iteration. For immediate effect, this callback
-                # should be paired with a custom training loop or DataLoader wrapper.
-                
-                # Extract batch components
-                if isinstance(batch, dict):
-                    part_features = batch.get("part_features")
-                    part_mask = batch.get("part_mask")
-                    jet_type_labels = batch.get("jet_type_labels")
-                else:
-                    # Try to extract from batch - might be a namedtuple or custom object
-                    return
-                
-                if part_features is None or part_mask is None or jet_type_labels is None:
-                    print(f"[Batch {self.batch_count}] Could not extract batch components")
-                    return
-                
-                # Convert to numpy if on GPU/GPU tensors
-                if hasattr(part_features, 'cpu'):
-                    part_features = part_features.cpu().numpy()
-                if hasattr(part_mask, 'cpu'):
-                    part_mask = part_mask.cpu().numpy()
-                if hasattr(jet_type_labels, 'cpu'):
-                    jet_type_labels = jet_type_labels.cpu().numpy()
-                
-                batch_size = len(jet_type_labels)
-                
-                # Find indices of Label 1 samples (polluted background) in the batch
-                label_1_indices = np.where(jet_type_labels == 1)[0]
-                
-                if len(label_1_indices) == 0:
-                    print(f"[Batch {self.batch_count}] No Label 1 samples in batch to replace")
-                    return
-                
-                # Determine number of samples to inject (min of requested and available)
-                n_to_inject = min(self.num_signal_jets, len(label_1_indices))
-                n_available_signal = self.injectable_signal_jets['n_jets_loaded']
-                
-                # Randomly select indices to replace from Label 1 samples
-                np.random.seed(self.batch_count)  # For reproducibility
-                replace_indices = np.random.choice(label_1_indices, size=n_to_inject, replace=False)
-                
-                # Randomly select signal jets to inject
-                signal_indices = np.random.choice(n_available_signal, size=n_to_inject, replace=True)
-                
-                # Get injectable signal data
-                injectable_features = self.injectable_signal_jets['part_features']  # (n_jets, max_particles, n_features)
-                injectable_mask = self.injectable_signal_jets['part_mask']  # (n_jets, max_particles)
-                
-                # Check shape compatibility
-                batch_max_particles = part_features.shape[1]
-                injectable_max_particles = injectable_features.shape[1]
-                
-                # Perform injection: replace selected batch samples with signal jets
-                for batch_idx_to_replace, signal_idx in zip(replace_indices, signal_indices):
-                    # Handle particle dimension mismatch
-                    if injectable_max_particles >= batch_max_particles:
-                        # Trim injectable jet to match batch size
-                        part_features[batch_idx_to_replace, :, :] = injectable_features[
-                            signal_idx, :batch_max_particles, :
-                        ]
-                        part_mask[batch_idx_to_replace, :] = injectable_mask[
-                            signal_idx, :batch_max_particles
-                        ]
-                    else:
-                        # Pad injectable jet to match batch size
-                        part_features[batch_idx_to_replace, :injectable_max_particles, :] = injectable_features[
-                            signal_idx, :, :
-                        ]
-                        part_features[batch_idx_to_replace, injectable_max_particles:, :] = 0.0
-                        part_mask[batch_idx_to_replace, :injectable_max_particles] = injectable_mask[
-                            signal_idx, :
-                        ]
-                        part_mask[batch_idx_to_replace, injectable_max_particles:] = 0
-                    
-                    # Keep label as 1 (signal jets are labeled as 1)
-                    jet_type_labels[batch_idx_to_replace] = 1
-                
-                # Update batch with modified arrays (convert back to tensor if needed)
-                batch["part_features"] = part_features
-                batch["part_mask"] = part_mask
-                batch["jet_type_labels"] = jet_type_labels
-                
-                self.signal_index = (self.signal_index + n_to_inject) % n_available_signal
-                
-                print(f"[Batch {self.batch_count}] ✓ Injected {n_to_inject} real signal jets")
-                print(f"[Batch {self.batch_count}] Replaced indices: {replace_indices}")
-                print(f"[Batch {self.batch_count}] Signal indices used: {signal_indices}")
-                
-            except Exception as e:
-                print(f"[Batch {self.batch_count}] Error during signal injection: {e}")
-                import traceback
-                traceback.print_exc()
+def evaluate_loader_auc(model, loader, device):
+    """Evaluate ROC AUC on a loader for current model weights."""
+    if loader is None:
+        return float("nan")
 
+    all_preds = []
+    all_labels = []
+    was_training = model.training
 
-def load_injectable_signal_jets(signal_path, num_signal_jets, input_features_dict):
-    """Load a small number of signal jets for injection into the training data.
-    
-    This function loads signal jets from an H5 file and prepares them for injection
-    into the training batches during the catastrophic forgetting experiment.
-    
-    Parameters
-    ----------
-    signal_path : str
-        Path to the signal H5 file (e.g., "sn_25k_SR_train.h5")
-    num_signal_jets : int
-        Number of signal jets to load for injection. If the file has fewer signal
-        jets than requested, all available signal jets are returned.
-    input_features_dict : dict
-        Feature preprocessing dictionary (e.g., {"part_pt": {...}, "part_etarel": {...}, ...})
-    
-    Returns
-    -------
-    dict or None
-        Dictionary containing preprocessed signal jets with the following keys:
-        - 'part_features': np.ndarray of shape (n_signal_jets, max_n_particles, n_features)
-          Preprocessed particle-level features (pt, etarel, phirel, etc.)
-        - 'part_mask': np.ndarray of shape (n_signal_jets, max_n_particles)
-          Binary mask indicating valid particles (1) vs padding (0)
-        - 'labels': np.ndarray of shape (n_signal_jets,)
-          Array of ones (all are signal jets) for verification
-        - 'n_jets_loaded': int
-          Actual number of signal jets loaded
-        - 'feature_names': list
-          Names of features in consistent order
-        - 'max_n_particles': int
-          Maximum number of particles in any jet
-        
-        Returns None if loading fails or no signal jets are found.
-    
-    Notes
-    -----
-    The loaded signal jets are filtered to include only true signal events (label=1).
-    These jets can then be randomly sampled during training to replace weakly labeled
-    events in batches, enabling the model to learn from real signal.
-    """
-    try:
-        print(f"[load_injectable_signal_jets] Loading signal jets from {signal_path}...")
-        
-        # Load all jets from the signal file
-        # jet_name="both" loads both jets and returns (jet1_features, jet2_features, labels)
-        jet1_features, jet2_features, labels = load_lhco_jets_from_h5(
-            h5_filename=signal_path,
-            feature_dict=input_features_dict,
-            n_jets=None,  # Load all available jets
-            jet_name="both",
-            mom4_format="epxpypz",
-            use_h5_features=True,
-        )
-        
-        # Concatenate both jets along the particle axis to create a combined jet representation
-        # jet1_features and jet2_features are both awkward arrays with structure (n_events, n_particles, n_features)
-        # We concatenate them along the particle axis: (n_events, n_particles_jet1 + n_particles_jet2, n_features)
-        preprocessed_features = ak.concatenate([jet1_features, jet2_features], axis=1)
-        
-        # Filter to keep only signal jets (label=1)
-        signal_mask = labels == 1
-        signal_features = preprocessed_features[signal_mask]
-        signal_labels = labels[signal_mask]
-        
-        n_signal_available = len(signal_labels)
-        n_to_load = min(num_signal_jets, n_signal_available)
-        
-        print(f"[load_injectable_signal_jets] Found {n_signal_available} signal jets in {signal_path}")
-        print(f"[load_injectable_signal_jets] Loading {n_to_load} signal jets for injection")
-        
-        if n_to_load == 0:
-            if num_signal_jets == 0:
-                print(f"[load_injectable_signal_jets] Using baseline (no signal injection requested)")
+    model.eval()
+    with torch.no_grad():
+        for batch in loader:
+            labels = batch["jet_type_labels"].to(device)
+
+            if isinstance(model, (BackboneDijetClassificationLightning, BackboneAachenClassificationLightning)):
+                X1 = batch["part_features"].to(device)
+                X2 = batch["part_features_jet2"].to(device)
+                mask1 = batch["part_mask"].to(device)
+                mask2 = batch["part_mask_jet2"].to(device)
+                logits = model(X1, mask1, X2, mask2)
             else:
-                print(f"[load_injectable_signal_jets] Warning: No signal jets found in {signal_path}")
-            return None
-        
-        # Select the first n_to_load signal jets
-        selected_features = signal_features[:n_to_load]
-        selected_labels = signal_labels[:n_to_load]
-        
-        # Convert awkward arrays to padded numpy arrays
-        
-        # Get the maximum number of particles across all selected jets
-        n_particles_per_jet = ak.count(selected_features, axis=1)
-        max_n_particles = int(ak.max(n_particles_per_jet))
-        
-        print(f"[load_injectable_signal_jets] Max particles per jet: {max_n_particles}")
-        
-        # Create placeholder for padded features
-        n_features = len(input_features_dict)  # Number of feature types
-        padded_features = np.zeros((n_to_load, max_n_particles, n_features), dtype=np.float32)
-        padded_mask = np.zeros((n_to_load, max_n_particles), dtype=np.int32)
-        
-        # Get feature names in consistent order
-        feature_names = sorted(input_features_dict.keys())
-        
-        # Fill the padded arrays
-        for jet_idx in range(n_to_load):
-            jet_features = selected_features[jet_idx]
-            n_particles_in_jet = len(jet_features)
-            
-            # Fill features for valid particles
-            for feat_idx, feat_name in enumerate(feature_names):
-                try:
-                    padded_features[jet_idx, :n_particles_in_jet, feat_idx] = np.array(
-                        jet_features[feat_name], dtype=np.float32
-                    )
-                except Exception as e:
-                    print(f"[load_injectable_signal_jets] Warning: Could not load feature {feat_name}: {e}")
-            
-            # Set mask for valid particles
-            padded_mask[jet_idx, :n_particles_in_jet] = 1
-        
-        injectable_jets = {
-            'part_features': padded_features,  # (n_jets, max_particles, n_features)
-            'part_mask': padded_mask,  # (n_jets, max_particles)
-            'labels': np.ones(n_to_load, dtype=np.int32),  # All signal jets
-            'n_jets_loaded': n_to_load,
-            'feature_names': feature_names,
-            'max_n_particles': max_n_particles,
-        }
-        
-        print(f"[load_injectable_signal_jets] Successfully loaded {n_to_load} signal jets")
-        return injectable_jets
-        
-    except Exception as e:
-        print(f"[load_injectable_signal_jets] Error loading injectable signal jets: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-    
+                X = batch["part_features"].to(device)
+                mask = batch["part_mask"].to(device)
+                logits = model(X, mask)
+
+            if logits.dim() == 1:
+                probs = torch.sigmoid(logits).cpu().numpy()
+            else:
+                probs = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
+
+            all_preds.append(probs)
+            all_labels.append(labels.cpu().numpy())
+
+    if was_training:
+        model.train()
+
+    if len(all_preds) == 0:
+        return float("nan")
+
+    y_pred = np.concatenate(all_preds)
+    y_true = np.concatenate(all_labels)
+    try:
+        return float(roc_auc_score(y_true, y_pred))
+    except Exception:
+        return float("nan")
     
 
 def main():
@@ -981,17 +665,13 @@ def main():
     parser.add_argument("--jet_name", type=str, default=str(os.getenv("JET_NAME")), choices=["jet1", "jet2", "both"], help="Name of the jet to use from the dataset")
     parser.add_argument("--merge_strategy", type=str, default=str(os.getenv("MERGE_STRATEGY")), choices=["concat", "average", "weighted_sum", "attention"], help="Merge strategy for dijet model")
     parser.add_argument("--batch_size", type=int, default=int(os.getenv("BATCH_SIZE")), help="Batch size for training")
-    parser.add_argument("--max_epochs", type=int, default=1, help="Maximum number of training epochs")
+    parser.add_argument("--max_epochs", type=int, default=2, help="Maximum number of training epochs")
     parser.add_argument("--learning_rate", type=float, default=float(os.getenv("LEARNING_RATE")), help="Learning rate")
     parser.add_argument("--train_val_split", type=float, default=float(os.getenv("TRAIN_VAL_SPLIT")), help="Train/validation split ratio")
     parser.add_argument("--embedding_dim", type=int, default=int(os.getenv("EMBEDDING_DIM")), help="Embedding dimension")
     parser.add_argument("--naming_identifier", type=str, default="", help="Optional identifier to add to the run name for easier tracking")
     parser.add_argument("--log_dir", type=str, default=str(os.getenv("LOG_DIR_AACHEN")), help="Directory for experiment logs")
     parser.add_argument("--use_class_weights", type=lambda x: x.lower() == 'true', default=True, help="Use automatic class weighting for imbalanced data (default: True)")
-    
-    # Signal injection parameters for catastrophic forgetting
-    parser.add_argument("--inject_freq", type=int, default=10, help="Inject signal jets every N batches (catastrophic forgetting experiment)")
-    parser.add_argument("--num_signal_jets", type=int, default=0, help="Number of signal jets to inject into label 1 on injection batches")
 
     # W&B arguments
     parser.add_argument("--use_wandb", action="store_true", help="Enable Weights & Biases logging")
@@ -1021,10 +701,10 @@ def main():
     # 2. Load Data
     # ============================================================
 
-    n_jets_train = [100, 10000, 20000]               # [signal, supp, background]
-    n_jets_train_artificial = [1, 10000, 20000]       # [signal, supp, background]
-    n_jets_test = [1000, 1000]                          # [signal, background]
-    injection_signal_jets = 25000  # Number of real signal jets to inject into label 1 during training
+    n_jets_train_epoch1 = [1000, 10000, 20000]  # [signal, supp, background]
+    n_jets_train_epoch2 = [60, 10000, 20000]    # [signal, supp, background]
+
+    n_jets_test = [5000, 5000]  # [signal, background]
 
     input_features_dict = {
         "part_pt": {"multiply_by": 1, "subtract_by": 1.8, "func": "signed_log", "inv_func": "signed_exp"},
@@ -1037,7 +717,10 @@ def main():
     supp_background_path = os.path.join(args.dataset_path, "bg_100k_SR_supp.h5")
     background_path = os.path.join(args.dataset_path, "bg_200k_SR_train.h5")
     h5_files_all = [signal_path, supp_background_path, background_path]
-    print("n_jets_train:",  n_jets_train)
+    frac_epoch1 = n_jets_train_epoch1[0] / float(sum(n_jets_train_epoch1))
+    frac_epoch2 = n_jets_train_epoch2[0] / float(sum(n_jets_train_epoch2))
+    print("n_jets_train_epoch1:", n_jets_train_epoch1, f"(signal fraction={frac_epoch1:.4%})")
+    print("n_jets_train_epoch2:", n_jets_train_epoch2, f"(signal fraction={frac_epoch2:.4%})")
     print("Using Jet:", args.jet_name)
 
     # Loading the test dataset (separate signal and background files)
@@ -1051,11 +734,9 @@ def main():
         "signal_file": signal_path,
         "supp_background_file": supp_background_path,
         "background_file": background_path,
-        "n_jets_train_full": n_jets_train,
-        "n_jets_train_artificial": n_jets_train_artificial,
-        "training_strategy": "Catastrophic Forgetting with Signal Injection",
-        "training_composition": f"n_jets_train_artificial={n_jets_train_artificial} (minimal signal for initial training)",
-        "validation_composition": f"n_jets_train={n_jets_train} (full signal count for validation)",
+        "n_jets_train_epoch1": n_jets_train_epoch1,
+        "n_jets_train_epoch2": n_jets_train_epoch2,
+        "training_strategy": "Two-phase catastrophic forgetting: epoch-1 high signal fraction -> epoch-2 low signal fraction",
         "batch_size": args.batch_size,
         "max_sequence_len": 128,
         "mom4_format": "epxpypz",
@@ -1064,20 +745,16 @@ def main():
         "feature_preprocessing": input_features_dict,
         "shuffle_train": True,
         "jet_name": args.jet_name,
-        "signal_injection_enabled": True,
-        "signal_injection_schedule": f"Inject {args.num_signal_jets} real signal jets every {args.inject_freq} batches",
-        "inject_signal_every_n_batches": args.inject_freq,
-        "num_signal_jets_per_injection": args.num_signal_jets,
-        "initial_signal_count": n_jets_train_artificial[0],
-        "full_signal_count": n_jets_train[0],
+        "epoch1_signal_fraction": frac_epoch1,
+        "epoch2_signal_fraction": frac_epoch2,
     }
     
-    train_loader, val_loader = create_custom_lhco_h5_dataloaders(
+    train_loader1, val_loader1 = create_custom_lhco_h5_dataloaders(
         h5_files_train=h5_files_all,
         h5_files_val=None,
         feature_dict=input_features_dict,
         batch_size=args.batch_size,
-        n_jets_train=n_jets_train,  # [signal, supp, background]
+        n_jets_train=n_jets_train_epoch1,  # [signal, supp, background]
         max_sequence_len=128,
         mom4_format="epxpypz",
         jet_name=args.jet_name,
@@ -1086,12 +763,12 @@ def main():
         num_workers=1,
     )
 
-    train_loader_artificial, val_loader_artificial = create_custom_lhco_h5_dataloaders(
+    train_loader2, val_loader2 = create_custom_lhco_h5_dataloaders(
         h5_files_train=h5_files_all,
         h5_files_val=None,
         feature_dict=input_features_dict,
         batch_size=args.batch_size,
-        n_jets_train=n_jets_train_artificial,  # [signal, supp, background]
+        n_jets_train=n_jets_train_epoch2,  # [signal, supp, background]
         max_sequence_len=128,
         mom4_format="epxpypz",
         jet_name=args.jet_name,
@@ -1125,8 +802,8 @@ def main():
         # Actual label distribution after loading:
         #   - Label 1: signal_real + supp_bg_labeled_as_signal  
         #   - Label 0: background_real
-        n_label_1 = n_jets_train[0] + n_jets_train[1]  # signal + supp background
-        n_label_0 = n_jets_train[2]  # clean background
+        n_label_1 = n_jets_train_epoch1[0] + n_jets_train_epoch1[1]  # signal + supp background
+        n_label_0 = n_jets_train_epoch1[2]  # clean background
         total = n_label_1 + n_label_0
         
         # Weight = total / (n_classes * n_samples_per_class)
@@ -1139,8 +816,8 @@ def main():
         print(f"\n=== Weak Supervision Label Distribution ===")
         print(f"Label 0 (clean background): {n_label_0} jets → weight={weight_label_0:.4f}")
         print(f"Label 1 (signal + polluted bg): {n_label_1} jets → weight={weight_label_1:.4f}")
-        print(f"  - True signal: {n_jets_train[0]}")
-        print(f"  - Polluted background: {n_jets_train[1]}")
+        print(f"  - True signal: {n_jets_train_epoch1[0]}")
+        print(f"  - Polluted background: {n_jets_train_epoch1[1]}")
         print(f"Weight ratio (Label_1/Label_0): {weight_label_1/weight_label_0:.4f}")
         print(f"Class weights array: {class_weights}\n")
         model_kwargs["class_weights"] = class_weights
@@ -1200,13 +877,25 @@ def main():
             "weight_decay": 1e-2,
         },
         "scheduler": "ConstantLR",
-        "max_epochs": 1,
+        "max_epochs": 2,
+        "phase_schedule": [
+            {
+                "phase": 1,
+                "epochs": 1,
+                "n_jets_train": n_jets_train_epoch1,
+                "signal_fraction": frac_epoch1,
+            },
+            {
+                "phase": 2,
+                "epochs": 1,
+                "n_jets_train": n_jets_train_epoch2,
+                "signal_fraction": frac_epoch2,
+            },
+        ],
         "test_roc_logged_per_train_batch": True,
         "embedding_visualization_per_batch": True,
         "embedding_visualization_dir": "plots/catastrophic_forgetting",
-        "signal_injection_enabled": True,
-        "signal_injection_freq": args.inject_freq,
-        "num_signal_jets_per_injection": args.num_signal_jets,
+        "signal_injection_enabled": False,
         "gradient_clip_val": 1.0,
         "precision": "32",
         "early_stopping_patience": 15,
@@ -1244,15 +933,6 @@ def main():
     # Test ROC callback: computes ROC AUC on test set after each train batch and logs it
     test_roc_callback = TestROCCallback(test_loader=test_loader)
 
-    # Signal injection callback: injects real signal jets every N batches
-    signal_injection_callback = SignalInjectionCallback(
-        signal_path=signal_path,
-        injection_signal_jets=injection_signal_jets,
-        num_signal_jets=args.num_signal_jets,
-        input_features_dict=input_features_dict,
-        inject_freq=args.inject_freq,
-    )
-
     # Embedding visualization callback: extract embeddings and plot t-SNE/UMAP after each batch
     embedding_viz_callback = EmbeddingVisualizationCallback(
         test_loader=test_loader,
@@ -1287,40 +967,84 @@ def main():
         print(f"\nW&B logging disabled. Use --use_wandb to enable.\n")
         wandb_logger = None
 
-    # Create trainer
-    print("Starting training...")
-    # Ensure Lightning uses the GPU requested via --gpu_id.
-    # Use explicit accelerator and devices so PL selects the correct device
-    # (accelerator="auto", devices=1 will pick the first visible GPU i.e. GPU 0).
-    trainer = L.Trainer(
-        max_epochs=1,
-        accelerator="gpu",
-        devices=[args.gpu_id],
-        logger=loggers if loggers else False,
-        callbacks=[auc_callback, argos_callback, test_roc_callback, signal_injection_callback], # embedding_viz_callback, early_stop_callback],
-        log_every_n_steps=1,
-        val_check_interval=1,
-        gradient_clip_val=1,
-        precision="32",
-        num_nodes=1,
-    )
+    use_gpu = torch.cuda.is_available()
+    accelerator = "gpu" if use_gpu else "cpu"
+    devices = [args.gpu_id] if use_gpu else 1
+
+    def make_trainer():
+        return L.Trainer(
+            max_epochs=1,
+            accelerator=accelerator,
+            devices=devices,
+            logger=loggers if loggers else False,
+            callbacks=[auc_callback, argos_callback, test_roc_callback],
+            log_every_n_steps=1,
+            val_check_interval=1,
+            gradient_clip_val=1,
+            precision="32",
+            num_nodes=1,
+        )
 
     # ============================================================
-    # 4. Training Loop
+    # 4. Two-Phase Training Loop
     # ============================================================
     print("\n" + "="*80)
     print("TRAINING CONFIGURATION:")
-    print(f"  Train loader: n_jets_train_artificial={n_jets_train_artificial} (minimal signal)")
-    print(f"  Val loader: n_jets_train={n_jets_train} (full signal count)")
-    print(f"  Signal injection: Every {args.inject_freq} batches, inject {args.num_signal_jets} real signal jets")
+    print(f"  Phase 1: n_jets_train={n_jets_train_epoch1}, signal fraction={frac_epoch1:.4%}")
+    print(f"  Phase 2: n_jets_train={n_jets_train_epoch2}, signal fraction={frac_epoch2:.4%}")
+    print(f"  Validation/Test loaders are fixed per phase setup; forgetting is tracked via ROC drop from phase 1 to phase 2")
     print("="*80 + "\n")
     
     try:
-        trainer.fit(
+        print("[Phase 1/2] Training on high-signal mixture...")
+        trainer_phase1 = make_trainer()
+        trainer_phase1.fit(
             model=model,
-            train_dataloaders=train_loader_artificial,
-            val_dataloaders=val_loader,
+            train_dataloaders=train_loader1,
+            val_dataloaders=val_loader1,
         )
+
+        phase1_test_auc = evaluate_loader_auc(model, test_loader, device)
+        phase1_val_auc = evaluate_loader_auc(model, val_loader1, device)
+        print(f"[Phase 1/2] val_auc={phase1_val_auc:.6f}, test_auc={phase1_test_auc:.6f}")
+
+        print("[Phase 2/2] Continuing training on low-signal mixture...")
+        trainer_phase2 = make_trainer()
+        trainer_phase2.fit(
+            model=model,
+            train_dataloaders=train_loader2,
+            val_dataloaders=val_loader2,
+        )
+
+        phase2_test_auc = evaluate_loader_auc(model, test_loader, device)
+        phase2_val_auc = evaluate_loader_auc(model, val_loader2, device)
+        print(f"[Phase 2/2] val_auc={phase2_val_auc:.6f}, test_auc={phase2_test_auc:.6f}")
+
+        forgetting_summary = {
+            "phase1": {
+                "n_jets_train": n_jets_train_epoch1,
+                "signal_fraction": frac_epoch1,
+                "val_auc": phase1_val_auc,
+                "test_auc": phase1_test_auc,
+            },
+            "phase2": {
+                "n_jets_train": n_jets_train_epoch2,
+                "signal_fraction": frac_epoch2,
+                "val_auc": phase2_val_auc,
+                "test_auc": phase2_test_auc,
+            },
+            "forgetting_delta": {
+                "val_auc_drop": phase1_val_auc - phase2_val_auc,
+                "test_auc_drop": phase1_test_auc - phase2_test_auc,
+            },
+            "training_completed": True,
+            "timestamp_end": datetime.now().isoformat(),
+        }
+        exp_logger.log_results(forgetting_summary)
+        print("\nFORGETTING SUMMARY")
+        print(f"  val_auc drop  : {forgetting_summary['forgetting_delta']['val_auc_drop']:.6f}")
+        print(f"  test_auc drop : {forgetting_summary['forgetting_delta']['test_auc_drop']:.6f}")
+        print(f"Results saved to: {exp_logger.run_dir / 'results.json'}")
         
         if args.use_wandb:
             print(f"W&B run: {wandb.run.url}")

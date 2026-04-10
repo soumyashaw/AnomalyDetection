@@ -13,7 +13,7 @@ cd $HOME/AnomalyDetection
 apptainer exec --nv $IMG bash -c "
     source /opt/conda/bin/activate
     cd \"$HOME/AnomalyDetection\"
-    python -m src.poc_expts.expt_catastrophic_forgetting_aachen --jet_name both --merge_strategy concat --batch_size 64 --naming_identifier poc_catas_forget_b9_s3 --inject_freq 9 --num_signal_jets 3 --use_wandb
+    python -m src.poc_expts.expt_catastrophic_forgetting_aachen_type2 --jet_name both --merge_strategy concat --batch_size 64 --max_epochs 2 --naming_identifier poc_catas_forget --use_wandb
     "
 
 echo "Job finished."

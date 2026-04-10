@@ -1,0 +1,23 @@
+{
+    "best_model_path": "/home/rww74320/AnomalyDetection/aachen_head_expts/run_accum_baseline_weak_600_20260321_082930/checkpoints/epoch_epoch=157_val_argos=0.0275.ckpt",
+    "best_model_score": 0.027483340352773666,
+    "current_epoch": 305,
+    "global_step": 1000000,
+    "training_completed": true,
+    "timestamp_end": "2026-03-21T21:00:16.694927",
+    "final_metrics": {
+        "train_loss": 0.7953497767448425,
+        "train_loss_step": 0.7802565097808838,
+        "train_acc": 0.6663295030593872,
+        "train_acc_step": 0.6875,
+        "val_loss": 0.7971959114074707,
+        "val_loss_epoch": 0.7971959114074707,
+        "val_acc": 0.6636171936988831,
+        "val_acc_epoch": 0.6636171936988831,
+        "val_auc": 0.5034511089324951,
+        "val_argos": 0.006569943390786648,
+        "train_loss_epoch": 0.7953497767448425,
+        "train_acc_epoch": 0.6663295030593872,
+        "epoch_train_duration_minutes": 0.2567947804927826
+    }
+}

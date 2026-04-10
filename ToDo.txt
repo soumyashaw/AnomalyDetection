@@ -13,17 +13,21 @@
 [✓] Design and run an experiment to show Grokking effect (maybe test on every 10 epochs)
 [✓] Get GPU access
 [✓] Restore saving top 3 checkpoints after Grokking expt for train_custom.py and train_custom_aachen.py
-[✓] Pretrain model on JetClass data
-[✓] Run finetuning on the pre-trained model of Supervised and Weakly supervised cases
-[✓] Use the new metric suggested by Marie for Training
+[ ] Pretrain model on JetClass data
+[ ] Run finetuning on the pre-trained model of Supervised and Weakly supervised cases
+[ ] Use the new metric suggested by Marie for Training
 [ ] Test the setup on Non idealised Anomaly Detection (CwoLa case)
 [ ] Write the thesis document
+[ ] Rename the 8k
 
 [ ] Find PhD groups and positions
 [ ] Fix CV for CERN application
 
 Currently running:
-[ ] python gabbro/train.py 'experiment=[ example_experiment_multi_head , example_experiment_generative_jetclass ]'
-[ ] python gabbro/train.py 'experiment=[ example_experiment_multi_head , example_experiment_classification_jetclass ]'
+[ ] python -m src.poc_expts.expt_grad_accumulation_aachen --gpu_id 0 --jet_name both --merge_strategy concat --naming_identifier accum_8x --accumulation_steps 8 --use_wandb (600 jets)
+[ ] python -m src.poc_expts.expt_grad_accumulation_aachen --gpu_id 0 --jet_name both --merge_strategy concat --naming_identifier accum_16x_weak_600 --accumulation_steps 16 --use_wandb
+[ ] python -m src.poc_expts.expt_grad_accumulation_aachen --gpu_id 0 --jet_name both --merge_strategy concat --naming_identifier accum_4x_weak_600 --accumulation_steps 4 --use_wandb
+[ ] python -m src.poc_expts.expt_grad_accumulation_aachen --gpu_id 0 --jet_name both --merge_strategy concat --naming_identifier accum_8x --accumulation_steps 8 --use_wandb
 
 Next:
+[ ] python -m src.poc_expts.expt_grad_accumulation_aachen --gpu_id 0 --jet_name both --merge_strategy concat --naming_identifier accum_1x_weak_600 --accumulation_steps 1 --use_wandb (change to 600)

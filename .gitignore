@@ -5,6 +5,7 @@ batchSubmissions/
 cache/
 .cache/
 README.md
+backbone_weights/
 
 # =========================
 # VS Code

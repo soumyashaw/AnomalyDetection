@@ -14,7 +14,7 @@ Key Features:
 
 Usage:
     # Extract and save backbone weights
-    python extract_backbone_weights.py \\
+    python extract_backbone.py \\
         --checkpoint path/to/best.ckpt \\
         --output_dir backbone_weights \\
         --verify \\

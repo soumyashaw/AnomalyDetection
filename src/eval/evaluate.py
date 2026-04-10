@@ -657,8 +657,8 @@ class ModelEvaluator:
         
         return tpr, sic
     
-    def plot_sic_curve(self, y_true, y_scores, signal_ratios=None):
-        """Plot SIC curves for multiple signal ratios.
+    def plot_sic_curve(self, y_true, y_scores, signal_ratio=1.0):
+        """Plot SIC curve for the given signal ratio.
         
         Parameters
         ----------
@@ -666,24 +666,24 @@ class ModelEvaluator:
             True labels
         y_scores : np.ndarray
             Predicted scores/probabilities
-        signal_ratios : list, optional
-            Signal ratios to plot (default: [0.1, 0.3, 0.5, 1.0])
+        signal_ratio : float, optional
+            Signal ratio for SIC calculation (default: 1.0)
+            
+        Returns
+        -------
+        max_sic : float
+            Maximum SIC value from the curve
         """
-        if signal_ratios is None:
-            signal_ratios = [0.1, 0.3, 0.5, 1.0]
-        
         fig, ax = plt.subplots(figsize=(8, 6))
         
-        # Color map for different signal ratios
-        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+        # Calculate SIC curve
+        tpr, sic = self.calculate_sic(y_true, y_scores, signal_ratio=signal_ratio)
         
-        # Plot SIC curves for each signal ratio
-        for idx, ratio in enumerate(signal_ratios):
-            tpr, sic = self.calculate_sic(y_true, y_scores, signal_ratio=ratio)
-            
-            label = f"{ratio * 100:.1f}%"
-            color = colors[idx % len(colors)]
-            ax.plot(tpr, sic, linewidth=2.0, label=label, color=color)
+        # Calculate max SIC
+        max_sic = float(np.max(sic)) if len(sic) > 0 else 0.0
+        
+        # Plot SIC curve
+        ax.plot(tpr, sic, linewidth=2.5, label='Model', color='#1f77b4')
         
         # Plot random classifier baseline (SIC = sqrt(TPR))
         tpr_random = np.linspace(0, 1, 1000)
@@ -695,7 +695,7 @@ class ModelEvaluator:
         ax.set_ylabel('SIC (TPR / $\\sqrt{\\mathrm{FPR}}$)', fontsize=14)
         ax.set_xlim([0.0, 1.0])
         ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
-        ax.legend(title='Signal ratio', loc='upper right', fontsize=12, title_fontsize=12)
+        ax.legend(loc='upper left', fontsize=12)
         ax.tick_params(labelsize=12)
         
         plt.tight_layout()
@@ -704,6 +704,8 @@ class ModelEvaluator:
         fig.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()
         print(f"SIC curve saved to {save_path}")
+        
+        return max_sic
     
     def save_results(self, metrics, y_true, y_pred):
         """Save evaluation results to JSON."""
@@ -762,6 +764,9 @@ class ModelEvaluator:
                     f.write(f"R30 (30% TPR):        {r30_val:.4f}\n")
                 f.write(f"R30 Actual TPR:       {metrics.get('r30_tpr', 'N/A')}\n")
                 f.write(f"R30 Status:           {metrics.get('r30_status', 'N/A')}\n")
+            # Add max SIC value if available
+            if "max_sic" in metrics:
+                f.write(f"Max SIC:                  {metrics['max_sic']:.4f}\n")
             f.write("\n")
             f.write("-" * 80 + "\n")
             f.write("DATA STATISTICS\n")
@@ -832,7 +837,17 @@ class ModelEvaluator:
         
         # Generate SIC curve
         print("Generating SIC curve...")
-        self.plot_sic_curve(y_true, y_pred, signal_ratios=[0.6, 1.0, 2.0, 5.0, 10.0])
+        max_sic = self.plot_sic_curve(y_true, y_pred, signal_ratio=1.0)
+        
+        # Print and store max SIC value
+        print("\n" + "-" * 80)
+        print("MAX SIC VALUE")
+        print("-" * 80)
+        print(f"Max SIC:                  {max_sic:.4f}")
+        print("-" * 80 + "\n")
+        
+        # Add max SIC value to metrics dictionary
+        metrics["max_sic"] = float(max_sic)
         
         # Save results
         print("\nSaving results...")

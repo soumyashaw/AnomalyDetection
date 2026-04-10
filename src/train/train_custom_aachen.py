@@ -980,15 +980,15 @@ def main():
     exp_logger.log_config(full_config)
     print(f"Configuration saved to: {exp_logger.run_dir / 'config.json'}")
     
-    # # Setup callbacks
-    # checkpoint_callback = ModelCheckpoint(
-    #     dirpath=exp_logger.get_checkpoint_dir(),
-    #     filename="{epoch:02d}_{val_loss:.4f}",
-    #     monitor="val_loss",
-    #     mode="min",
-    #     save_top_k=1,
-    #     save_last=False,
-    # )
+    # Setup callbacks
+    checkpoint_loss_callback = ModelCheckpoint(
+        dirpath=exp_logger.get_checkpoint_dir(),
+        filename="{epoch:02d}_{val_loss:.4f}",
+        monitor="val_loss",
+        mode="min",
+        save_top_k=1,
+        save_last=False,
+    )
 
     # Alternatively, monitor AUC instead of loss
     # checkpoint_callback = ModelCheckpoint(
@@ -1001,7 +1001,7 @@ def main():
     # )
 
     # Or using ARGOS metric
-    checkpoint_callback = ModelCheckpoint(
+    checkpoint_argos_callback = ModelCheckpoint(
         dirpath=exp_logger.get_checkpoint_dir(),
         filename="{epoch:02d}_{val_argos:.4f}",
         monitor="val_argos",
@@ -1011,11 +1011,11 @@ def main():
     )
     
     # Early stopping disabled
-    # early_stop_callback = EarlyStopping(
-    #     monitor="val_argos",
-    #     patience=50,
-    #     mode="max",
-    # )
+    early_stop_callback = EarlyStopping(
+        monitor="val_argos",
+        patience=75,
+        mode="max",
+    )
 
     # AUC callback: computes ROC AUC on validation set each epoch and logs it
     auc_callback = AUCCallback()
@@ -1060,7 +1060,7 @@ def main():
         accelerator="gpu",
         devices=[args.gpu_id],
         logger=loggers if loggers else False,
-        callbacks=[checkpoint_callback, auc_callback, argos_callback], #early_stop_callback],
+        callbacks=[checkpoint_loss_callback, checkpoint_argos_callback, auc_callback, argos_callback, early_stop_callback],
         log_every_n_steps=20,
         gradient_clip_val=1,
         precision="32",

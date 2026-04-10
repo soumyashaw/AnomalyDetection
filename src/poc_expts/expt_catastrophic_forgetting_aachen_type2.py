@@ -615,6 +615,9 @@ def evaluate_loader_auc(model, loader, device):
     if loader is None:
         return float("nan")
 
+    # Use the model's current device (Lightning may move modules after fit).
+    model_device = next(model.parameters()).device
+
     all_preds = []
     all_labels = []
     was_training = model.training
@@ -622,17 +625,17 @@ def evaluate_loader_auc(model, loader, device):
     model.eval()
     with torch.no_grad():
         for batch in loader:
-            labels = batch["jet_type_labels"].to(device)
+            labels = batch["jet_type_labels"].to(model_device)
 
             if isinstance(model, (BackboneDijetClassificationLightning, BackboneAachenClassificationLightning)):
-                X1 = batch["part_features"].to(device)
-                X2 = batch["part_features_jet2"].to(device)
-                mask1 = batch["part_mask"].to(device)
-                mask2 = batch["part_mask_jet2"].to(device)
+                X1 = batch["part_features"].to(model_device)
+                X2 = batch["part_features_jet2"].to(model_device)
+                mask1 = batch["part_mask"].to(model_device)
+                mask2 = batch["part_mask_jet2"].to(model_device)
                 logits = model(X1, mask1, X2, mask2)
             else:
-                X = batch["part_features"].to(device)
-                mask = batch["part_mask"].to(device)
+                X = batch["part_features"].to(model_device)
+                mask = batch["part_mask"].to(model_device)
                 logits = model(X, mask)
 
             if logits.dim() == 1:
@@ -702,9 +705,9 @@ def main():
     # ============================================================
 
     n_jets_train_epoch1 = [1000, 10000, 20000]  # [signal, supp, background]
-    n_jets_train_epoch2 = [60, 10000, 20000]    # [signal, supp, background]
+    n_jets_train_epoch2 = [1, 10000, 20000]    # [signal, supp, background]
 
-    n_jets_test = [5000, 5000]  # [signal, background]
+    n_jets_test = [1000, 1000]  # [signal, background]
 
     input_features_dict = {
         "part_pt": {"multiply_by": 1, "subtract_by": 1.8, "func": "signed_log", "inv_func": "signed_exp"},
@@ -740,7 +743,7 @@ def main():
         "batch_size": args.batch_size,
         "max_sequence_len": 128,
         "mom4_format": "epxpypz",
-        "train_val_split": args.train_val_split,
+        "train_val_split": 0.8,
         "features": list(input_features_dict.keys()),
         "feature_preprocessing": input_features_dict,
         "shuffle_train": True,
@@ -758,7 +761,7 @@ def main():
         max_sequence_len=128,
         mom4_format="epxpypz",
         jet_name=args.jet_name,
-        train_val_split=args.train_val_split,
+        train_val_split=0.8,
         shuffle_train=True,
         num_workers=1,
     )
@@ -772,7 +775,7 @@ def main():
         max_sequence_len=128,
         mom4_format="epxpypz",
         jet_name=args.jet_name,
-        train_val_split=args.train_val_split,
+        train_val_split=0.8,
         shuffle_train=True,
         num_workers=1,
     )

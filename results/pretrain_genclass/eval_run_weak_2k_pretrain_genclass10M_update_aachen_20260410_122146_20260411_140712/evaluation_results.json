@@ -1,0 +1,58 @@
+{
+    "checkpoint_path": "aachen_head_expts/run_weak_2k_pretrain_genclass10M_update_aachen_20260410_122146/checkpoints/epoch=22_val_argos=0.0338.ckpt",
+    "evaluation_timestamp": "20260411_140712",
+    "metrics": {
+        "roc_auc": 0.779285776,
+        "average_precision": 0.4620718540806518,
+        "accuracy": 0.8,
+        "sensitivity": 0.0,
+        "specificity": 1.0,
+        "threshold_used": 0.5,
+        "optimal_threshold": 0.4303341507911682,
+        "confusion_matrix": [
+            [
+                200000,
+                0
+            ],
+            [
+                50000,
+                0
+            ]
+        ],
+        "classification_report": {
+            "Background": {
+                "precision": 0.8,
+                "recall": 1.0,
+                "f1-score": 0.8888888888888888,
+                "support": 200000.0
+            },
+            "Signal": {
+                "precision": 0.0,
+                "recall": 0.0,
+                "f1-score": 0.0,
+                "support": 50000.0
+            },
+            "accuracy": 0.8,
+            "macro avg": {
+                "precision": 0.4,
+                "recall": 0.5,
+                "f1-score": 0.4444444444444444,
+                "support": 250000.0
+            },
+            "weighted avg": {
+                "precision": 0.64,
+                "recall": 0.8,
+                "f1-score": 0.7111111111111111,
+                "support": 250000.0
+            }
+        },
+        "n_samples": 250000,
+        "n_signal": 50000,
+        "n_background": 200000,
+        "r30": 16.118633139909736,
+        "r30_tpr": 0.30014,
+        "r30_status": "ok",
+        "max_sic": 1.3429228247973832
+    },
+    "device": "cuda:0"
+}

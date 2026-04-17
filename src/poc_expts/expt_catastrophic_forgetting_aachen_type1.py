@@ -547,77 +547,6 @@ class EmbeddingVisualizationCallback(Callback):
 
         print(f"  Plots saved to: {batch_dir}")
 
-class ARGOSCallback(Callback):
-    """Compute ARGOS metric on the validation set at the end of each validation epoch.
-    ARGOS is defined as: max(tpr/sqrt(fpr) - sqrt(tpr)) for fpr > 0.
-    """
-
-    def on_validation_epoch_end(self, trainer, pl_module):
-        # Get validation dataloader
-        try:
-            val_loaders = trainer.val_dataloaders
-        except Exception:
-            val_loaders = None
-        if not val_loaders:
-            return
-
-        # Handle both single DataLoader and list of DataLoaders
-        if isinstance(val_loaders, list):
-            val_loader = val_loaders[0]
-        else:
-            val_loader = val_loaders
-            
-        device = pl_module.device if hasattr(pl_module, 'device') else (torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu'))
-
-        all_preds = []
-        all_labels = []
-
-        pl_module.eval()
-        with torch.no_grad():
-            for batch in val_loader:
-                labels = batch["jet_type_labels"].to(device)
-                
-                # Check if model is dijet or single-jet
-                if isinstance(pl_module, BackboneAachenClassificationLightning):
-                    X1 = batch["part_features"].to(device)
-                    X2 = batch["part_features_jet2"].to(device)
-                    mask1 = batch["part_mask"].to(device)
-                    mask2 = batch["part_mask_jet2"].to(device)
-                    logits = pl_module(X1, mask1, X2, mask2)
-                else:
-                    X = batch["part_features"].to(device)
-                    mask = batch["part_mask"].to(device)
-                    logits = pl_module(X, mask)
-
-                # Handle different logit shapes
-                if logits.dim() == 1:
-                    # Binary classification with single logit (BCEWithLogitsLoss)
-                    probs = torch.sigmoid(logits).cpu().numpy()
-                else:
-                    # Multi-class with softmax
-                    probs = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
-                all_preds.append(probs)
-                all_labels.append(labels.cpu().numpy())
-
-        if len(all_preds) == 0:
-            return
-
-        y_pred = np.concatenate(all_preds)
-        y_true = np.concatenate(all_labels)
-
-        # Compute ARGOS metric
-        try:
-            fpr, tpr, thresholds = roc_curve(y_true, y_pred)
-            inds = np.nonzero(fpr)
-            tpr = tpr[inds]
-            fpr = fpr[inds]
-            argos = float(np.max(tpr/np.sqrt(fpr) - np.sqrt(tpr)))
-        except Exception:
-            argos = float('nan')
-
-        # Log the metric
-        pl_module.log("val_argos", argos, prog_bar=True, logger=True)
-
 
 class TestROCCallback(Callback):
     """Compute ROC AUC on the test set after each training batch and log it.
@@ -718,124 +647,133 @@ class SignalInjectionCallback(Callback):
         self.signal_index = 0
         
     def on_train_start(self, trainer, pl_module):
-        """Load injectable signal jets at the start of training."""
+        """Load injectable signal jets and pre-cache them as GPU tensors."""
+        if self.num_signal_jets == 0:
+            print(f"\n[SignalInjectionCallback] num_signal_jets=0 — skipping signal loading (pure baseline run).")
+            return
         print(f"\n[SignalInjectionCallback] Loading injectable signal jets from {self.signal_path}...")
         try:
             self.injectable_signal_jets = load_injectable_signal_jets(
-                self.signal_path, 
+                self.signal_path,
                 self.injection_signal_jets,
                 self.input_features_dict
             )
-            print(f"[SignalInjectionCallback] Loaded signal jets for injection.")
+            if self.injectable_signal_jets is not None:
+                device = pl_module.device
+                # Pre-move to device to avoid repeated host→device transfers during training
+                self.injectable_signal_jets['t_feat1'] = torch.from_numpy(
+                    self.injectable_signal_jets['part_features_jet1']
+                ).to(device)
+                self.injectable_signal_jets['t_mask1'] = torch.from_numpy(
+                    self.injectable_signal_jets['part_mask_jet1']
+                ).to(device)
+                self.injectable_signal_jets['t_feat2'] = torch.from_numpy(
+                    self.injectable_signal_jets['part_features_jet2']
+                ).to(device)
+                self.injectable_signal_jets['t_mask2'] = torch.from_numpy(
+                    self.injectable_signal_jets['part_mask_jet2']
+                ).to(device)
+                print(f"[SignalInjectionCallback] Signal dijet events cached on device {device}.")
         except Exception as e:
             print(f"[SignalInjectionCallback] Warning: Failed to load injectable signal jets: {e}")
             self.injectable_signal_jets = None
     
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        """Handle signal injection every inject_freq batches.
-        
-        This method is called after each training batch. Every inject_freq batches,
-        it replaces some Label 1 (polluted background) samples with real signal jets.
+    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
+        """Inject real signal dijet events into the batch BEFORE the forward pass.
+
+        Called by Lightning before training_step, so the injected samples are
+        actually seen by the model during the current iteration.
         """
         self.batch_count += 1
-        
-        if self.batch_count % self.inject_freq == 0 and self.injectable_signal_jets is not None:
-            try:
-                print(f"\n[Batch {self.batch_count}] Injecting {self.num_signal_jets} real signal jets into Label 1...")
+
+        if self.num_signal_jets == 0:
+            return
+        if self.batch_count % self.inject_freq != 0:
+            return
+        if self.injectable_signal_jets is None:
+            return
+
+        try:
+            jet_type_labels = batch["jet_type_labels"]
+            batch_size_before = len(jet_type_labels)
+            n_label0_before = int((jet_type_labels == 0).sum())
+            n_label1_before = int((jet_type_labels == 1).sum())
+
+            # Find label-1 slots (impure signal) — injection is ONLY ever into these slots
+            label_1_indices = (jet_type_labels == 1).nonzero(as_tuple=True)[0]
+
+            if len(label_1_indices) == 0:
+                print(f"[Batch {self.batch_count}] No Label-1 samples in batch to replace")
+                return
+
+            n_to_inject = min(self.num_signal_jets, len(label_1_indices))
+            n_available = self.injectable_signal_jets['n_jets_loaded']
+
+            # Randomly select which label-1 slots to replace and which signal events to use
+            perm = torch.randperm(len(label_1_indices))[:n_to_inject]
+            replace_indices = label_1_indices[perm]
+            signal_indices = torch.randint(0, n_available, (n_to_inject,))
+
+            # Guard: every selected index must be a label-1 slot
+            assert (jet_type_labels[replace_indices] == 1).all(), (
+                "Injection attempted into non-label-1 slots — this is a bug."
+            )
+
+            inj_feat1 = self.injectable_signal_jets['t_feat1']
+            inj_mask1 = self.injectable_signal_jets['t_mask1']
+            inj_feat2 = self.injectable_signal_jets['t_feat2']
+            inj_mask2 = self.injectable_signal_jets['t_mask2']
+
+            def _inject(batch_feat, batch_mask, inj_feat, inj_mask):
+                """In-place replacement of selected label-1 rows with real signal jets.
                 
-                # Note: on_train_batch_end is called AFTER the backward pass, so modifications
-                # here affect the next training iteration. For immediate effect, this callback
-                # should be paired with a custom training loop or DataLoader wrapper.
-                
-                # Extract batch components
-                if isinstance(batch, dict):
-                    part_features = batch.get("part_features")
-                    part_mask = batch.get("part_mask")
-                    jet_type_labels = batch.get("jet_type_labels")
-                else:
-                    # Try to extract from batch - might be a namedtuple or custom object
-                    return
-                
-                if part_features is None or part_mask is None or jet_type_labels is None:
-                    print(f"[Batch {self.batch_count}] Could not extract batch components")
-                    return
-                
-                # Convert to numpy if on GPU/GPU tensors
-                if hasattr(part_features, 'cpu'):
-                    part_features = part_features.cpu().numpy()
-                if hasattr(part_mask, 'cpu'):
-                    part_mask = part_mask.cpu().numpy()
-                if hasattr(jet_type_labels, 'cpu'):
-                    jet_type_labels = jet_type_labels.cpu().numpy()
-                
-                batch_size = len(jet_type_labels)
-                
-                # Find indices of Label 1 samples (polluted background) in the batch
-                label_1_indices = np.where(jet_type_labels == 1)[0]
-                
-                if len(label_1_indices) == 0:
-                    print(f"[Batch {self.batch_count}] No Label 1 samples in batch to replace")
-                    return
-                
-                # Determine number of samples to inject (min of requested and available)
-                n_to_inject = min(self.num_signal_jets, len(label_1_indices))
-                n_available_signal = self.injectable_signal_jets['n_jets_loaded']
-                
-                # Randomly select indices to replace from Label 1 samples
-                np.random.seed(self.batch_count)  # For reproducibility
-                replace_indices = np.random.choice(label_1_indices, size=n_to_inject, replace=False)
-                
-                # Randomly select signal jets to inject
-                signal_indices = np.random.choice(n_available_signal, size=n_to_inject, replace=True)
-                
-                # Get injectable signal data
-                injectable_features = self.injectable_signal_jets['part_features']  # (n_jets, max_particles, n_features)
-                injectable_mask = self.injectable_signal_jets['part_mask']  # (n_jets, max_particles)
-                
-                # Check shape compatibility
-                batch_max_particles = part_features.shape[1]
-                injectable_max_particles = injectable_features.shape[1]
-                
-                # Perform injection: replace selected batch samples with signal jets
-                for batch_idx_to_replace, signal_idx in zip(replace_indices, signal_indices):
-                    # Handle particle dimension mismatch
-                    if injectable_max_particles >= batch_max_particles:
-                        # Trim injectable jet to match batch size
-                        part_features[batch_idx_to_replace, :, :] = injectable_features[
-                            signal_idx, :batch_max_particles, :
-                        ]
-                        part_mask[batch_idx_to_replace, :] = injectable_mask[
-                            signal_idx, :batch_max_particles
-                        ]
-                    else:
-                        # Pad injectable jet to match batch size
-                        part_features[batch_idx_to_replace, :injectable_max_particles, :] = injectable_features[
-                            signal_idx, :, :
-                        ]
-                        part_features[batch_idx_to_replace, injectable_max_particles:, :] = 0.0
-                        part_mask[batch_idx_to_replace, :injectable_max_particles] = injectable_mask[
-                            signal_idx, :
-                        ]
-                        part_mask[batch_idx_to_replace, injectable_max_particles:] = 0
-                    
-                    # Keep label as 1 (signal jets are labeled as 1)
-                    jet_type_labels[batch_idx_to_replace] = 1
-                
-                # Update batch with modified arrays (convert back to tensor if needed)
-                batch["part_features"] = part_features
-                batch["part_mask"] = part_mask
-                batch["jet_type_labels"] = jet_type_labels
-                
-                self.signal_index = (self.signal_index + n_to_inject) % n_available_signal
-                
-                print(f"[Batch {self.batch_count}] ✓ Injected {n_to_inject} real signal jets")
-                print(f"[Batch {self.batch_count}] Replaced indices: {replace_indices}")
-                print(f"[Batch {self.batch_count}] Signal indices used: {signal_indices}")
-                
-            except Exception as e:
-                print(f"[Batch {self.batch_count}] Error during signal injection: {e}")
-                import traceback
-                traceback.print_exc()
+                The total number of rows in the batch is unchanged: we are
+                overwriting existing label-1 entries, not appending new ones.
+                """
+                b_max_p = batch_feat.shape[1]
+                i_max_p = inj_feat.shape[1]
+                n_p = min(b_max_p, i_max_p)
+                batch_feat[replace_indices, :n_p, :] = inj_feat[signal_indices, :n_p, :]
+                if i_max_p < b_max_p:
+                    batch_feat[replace_indices, i_max_p:, :] = 0.0
+                batch_mask[replace_indices, :n_p] = inj_mask[signal_indices, :n_p]
+                if i_max_p < b_max_p:
+                    batch_mask[replace_indices, i_max_p:] = 0.0
+
+            # Replace both jet slots so the model receives a complete dijet event
+            _inject(batch["part_features"], batch["part_mask"], inj_feat1, inj_mask1)
+            if "part_features_jet2" in batch:
+                _inject(batch["part_features_jet2"], batch["part_mask_jet2"], inj_feat2, inj_mask2)
+
+            # Labels are intentionally left as 1: real signal jets correctly belong to
+            # the label-1 (impure signal) class.  No label-0 samples are touched.
+
+            # Post-injection sanity checks
+            batch_size_after = len(jet_type_labels)
+            n_label0_after = int((jet_type_labels == 0).sum())
+            n_label1_after = int((jet_type_labels == 1).sum())
+
+            assert batch_size_after == batch_size_before, (
+                f"Batch size changed after injection: {batch_size_before} → {batch_size_after}"
+            )
+            assert n_label0_after == n_label0_before, (
+                f"Label-0 count changed after injection: {n_label0_before} → {n_label0_after}"
+            )
+            assert n_label1_after == n_label1_before, (
+                f"Label-1 count changed after injection: {n_label1_before} → {n_label1_after}"
+            )
+
+            print(
+                f"[Batch {self.batch_count}] Injected {n_to_inject} real signal dijet events "
+                f"into Label-1 slots "
+                f"(batch: {batch_size_after} total | label-0: {n_label0_after} | label-1: {n_label1_after}; "
+                f"of which {n_to_inject} are now real signal, {n_label1_after - n_to_inject} remain impure bg)"
+            )
+
+        except Exception as e:
+            print(f"[Batch {self.batch_count}] Error during signal injection: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 def load_injectable_signal_jets(signal_path, num_signal_jets, input_features_dict):
@@ -893,76 +831,70 @@ def load_injectable_signal_jets(signal_path, num_signal_jets, input_features_dic
             use_h5_features=True,
         )
         
-        # Concatenate both jets along the particle axis to create a combined jet representation
-        # jet1_features and jet2_features are both awkward arrays with structure (n_events, n_particles, n_features)
-        # We concatenate them along the particle axis: (n_events, n_particles_jet1 + n_particles_jet2, n_features)
-        preprocessed_features = ak.concatenate([jet1_features, jet2_features], axis=1)
-        
-        # Filter to keep only signal jets (label=1)
+        # Filter to keep only true signal events (label=1), preserving jet1 and jet2 separately
+        # so that complete dijet events can be injected into both slots of the batch.
         signal_mask = labels == 1
-        signal_features = preprocessed_features[signal_mask]
+        signal_jet1 = jet1_features[signal_mask]
+        signal_jet2 = jet2_features[signal_mask]
         signal_labels = labels[signal_mask]
-        
+
         n_signal_available = len(signal_labels)
         n_to_load = min(num_signal_jets, n_signal_available)
-        
-        print(f"[load_injectable_signal_jets] Found {n_signal_available} signal jets in {signal_path}")
-        print(f"[load_injectable_signal_jets] Loading {n_to_load} signal jets for injection")
-        
+
+        print(f"[load_injectable_signal_jets] Found {n_signal_available} signal events in {signal_path}")
+        print(f"[load_injectable_signal_jets] Loading {n_to_load} signal dijet events for injection")
+
         if n_to_load == 0:
             if num_signal_jets == 0:
                 print(f"[load_injectable_signal_jets] Using baseline (no signal injection requested)")
             else:
                 print(f"[load_injectable_signal_jets] Warning: No signal jets found in {signal_path}")
             return None
-        
-        # Select the first n_to_load signal jets
-        selected_features = signal_features[:n_to_load]
-        selected_labels = signal_labels[:n_to_load]
-        
-        # Convert awkward arrays to padded numpy arrays
-        
-        # Get the maximum number of particles across all selected jets
-        n_particles_per_jet = ak.count(selected_features, axis=1)
-        max_n_particles = int(ak.max(n_particles_per_jet))
-        
-        print(f"[load_injectable_signal_jets] Max particles per jet: {max_n_particles}")
-        
-        # Create placeholder for padded features
-        n_features = len(input_features_dict)  # Number of feature types
-        padded_features = np.zeros((n_to_load, max_n_particles, n_features), dtype=np.float32)
-        padded_mask = np.zeros((n_to_load, max_n_particles), dtype=np.int32)
-        
-        # Get feature names in consistent order
+
+        selected_jet1 = signal_jet1[:n_to_load]
+        selected_jet2 = signal_jet2[:n_to_load]
+
+        n_features = len(input_features_dict)
         feature_names = sorted(input_features_dict.keys())
-        
-        # Fill the padded arrays
-        for jet_idx in range(n_to_load):
-            jet_features = selected_features[jet_idx]
-            n_particles_in_jet = len(jet_features)
-            
-            # Fill features for valid particles
-            for feat_idx, feat_name in enumerate(feature_names):
-                try:
-                    padded_features[jet_idx, :n_particles_in_jet, feat_idx] = np.array(
-                        jet_features[feat_name], dtype=np.float32
-                    )
-                except Exception as e:
-                    print(f"[load_injectable_signal_jets] Warning: Could not load feature {feat_name}: {e}")
-            
-            # Set mask for valid particles
-            padded_mask[jet_idx, :n_particles_in_jet] = 1
-        
+
+        def _pad_jets_to_numpy(jets_ak, n_jets, n_feats, feat_names):
+            """Pad a jagged record array of jets to a dense numpy array.
+
+            jets_ak is an awkward record array of shape (n_jets,) where each
+            field (e.g. 'part_pt') is a variable-length array of particles.
+            We use the first feature field to determine particle counts.
+            """
+            # particle counts per jet via the first feature field
+            n_particles = ak.to_numpy(ak.num(jets_ak[feat_names[0]], axis=1))
+            max_p = int(n_particles.max())
+            padded = np.zeros((n_jets, max_p, n_feats), dtype=np.float32)
+            mask = np.zeros((n_jets, max_p), dtype=np.float32)
+            for i in range(n_jets):
+                n_p = int(n_particles[i])
+                for fi, fn in enumerate(feat_names):
+                    try:
+                        padded[i, :n_p, fi] = ak.to_numpy(jets_ak[fn][i]).astype(np.float32)
+                    except Exception as e:
+                        print(f"[load_injectable_signal_jets] Warning: feature {fn}: {e}")
+                mask[i, :n_p] = 1.0
+            return padded, mask, max_p
+
+        padded_feat1, mask1, max_p1 = _pad_jets_to_numpy(selected_jet1, n_to_load, n_features, feature_names)
+        padded_feat2, mask2, max_p2 = _pad_jets_to_numpy(selected_jet2, n_to_load, n_features, feature_names)
+
+        print(f"[load_injectable_signal_jets] Jet1 max particles: {max_p1}, Jet2 max particles: {max_p2}")
+
         injectable_jets = {
-            'part_features': padded_features,  # (n_jets, max_particles, n_features)
-            'part_mask': padded_mask,  # (n_jets, max_particles)
-            'labels': np.ones(n_to_load, dtype=np.int32),  # All signal jets
+            'part_features_jet1': padded_feat1,   # (n_jets, max_p1, n_features)
+            'part_mask_jet1': mask1,               # (n_jets, max_p1)
+            'part_features_jet2': padded_feat2,   # (n_jets, max_p2, n_features)
+            'part_mask_jet2': mask2,               # (n_jets, max_p2)
+            'labels': np.ones(n_to_load, dtype=np.int32),
             'n_jets_loaded': n_to_load,
             'feature_names': feature_names,
-            'max_n_particles': max_n_particles,
         }
-        
-        print(f"[load_injectable_signal_jets] Successfully loaded {n_to_load} signal jets")
+
+        print(f"[load_injectable_signal_jets] Successfully loaded {n_to_load} signal dijet events")
         return injectable_jets
         
     except Exception as e:
@@ -1021,9 +953,9 @@ def main():
     # 2. Load Data
     # ============================================================
 
-    n_jets_train = [100, 10000, 20000]               # [signal, supp, background]
-    n_jets_train_artificial = [1, 10000, 20000]       # [signal, supp, background]
-    n_jets_test = [1000, 1000]                          # [signal, background]
+    n_jets_train = [1000, 100000, 200000]               # [signal, supp, background]
+    n_jets_train_artificial = [1, 100000, 200000]       # [signal, supp, background]
+    n_jets_test = [10000, 10000]                          # [signal, background]
     injection_signal_jets = 25000  # Number of real signal jets to inject into label 1 during training
 
     input_features_dict = {
@@ -1200,7 +1132,7 @@ def main():
             "weight_decay": 1e-2,
         },
         "scheduler": "ConstantLR",
-        "max_epochs": 1,
+        "max_epochs": 5,
         "test_roc_logged_per_train_batch": True,
         "embedding_visualization_per_batch": True,
         "embedding_visualization_dir": "plots/catastrophic_forgetting",
@@ -1293,7 +1225,7 @@ def main():
     # Use explicit accelerator and devices so PL selects the correct device
     # (accelerator="auto", devices=1 will pick the first visible GPU i.e. GPU 0).
     trainer = L.Trainer(
-        max_epochs=1,
+        max_epochs=5,
         accelerator="gpu",
         devices=[args.gpu_id],
         logger=loggers if loggers else False,

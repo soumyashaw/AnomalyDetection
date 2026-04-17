@@ -4,7 +4,12 @@ import awkward as ak
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader, TensorDataset
-from gabbro.data.loading import load_lhco_jets_from_h5, load_multiple_h5_files
+from gabbro.data.loading import (
+    load_lhco_jets_from_h5,
+    load_multiple_h5_files,
+    load_case_jets_from_h5,
+    load_multiple_case_h5_files,
+)
 from gabbro.utils.arrays import ak_pad, ak_to_np_stack
 
 
@@ -774,7 +779,7 @@ def create_lhco_h5_test_loader(
     mom4_format : str
         4-momentum format in HDF5 files
     jet_name : str
-        Jet name in H5 files ("jet1" or "jet2")
+        Jet name in H5 files ("jet1", "jet2", or "both")
     shuffle_test : bool
         Whether to shuffle test data
     num_workers : int
@@ -935,12 +940,12 @@ def create_lhco_h5_test_loader(
             
             def __getitem__(self, idx):
                 return {
-                    "part_features": self.features_jet1[idx],
+                    "part_features":      self.features_jet1[idx],
                     "part_features_jet2": self.features_jet2[idx],
-                    "part_mask": self.masks_jet1[idx],
-                    "part_mask_jet2": self.masks_jet2[idx],
-                    "jet_type_labels": self.labels[idx],
-                    "jet_features": torch.tensor([]),
+                    "part_mask":          self.masks_jet1[idx],
+                    "part_mask_jet2":     self.masks_jet2[idx],
+                    "jet_type_labels":    self.labels[idx],
+                    "jet_features":       torch.tensor([]),
                 }
         
         # Create test dataset
@@ -959,3 +964,291 @@ def create_lhco_h5_test_loader(
     )
     
     return test_loader
+
+
+# ---------------------------------------------------------------------------
+# CASE dataset loaders
+# ---------------------------------------------------------------------------
+
+
+def create_case_h5_dataloaders(
+    h5_files_train,
+    h5_files_val,
+    feature_dict,
+    batch_size=64,
+    n_jets_train=None,
+    n_jets_val=None,
+    max_sequence_len=128,
+    jet_name="jet1",
+    train_val_split=None,
+    shuffle_train=True,
+    num_workers=1,
+):
+    """Create PyTorch DataLoaders from CASE HDF5 files.
+
+    Parameters
+    ----------
+    h5_files_train : list of str
+        HDF5 file paths for training (background files recommended).
+    h5_files_val : list of str
+        HDF5 file paths for validation.  Ignored when *train_val_split* is set.
+    feature_dict : dict
+        Feature preprocessing dictionary.
+    batch_size : int
+        Batch size.
+    n_jets_train : int or list of int, optional
+        Events to load per training file.
+    n_jets_val : int or list of int, optional
+        Events to load per validation file.
+    max_sequence_len : int
+        Padding length for PF-candidate sequences.
+    jet_name : str
+        ``"jet1"``, ``"jet2"``, or ``"both"``.
+    train_val_split : float, optional
+        Fraction of *h5_files_train* data used for training.  The remainder
+        becomes validation.  *h5_files_val* is ignored in this case.
+    shuffle_train : bool
+    num_workers : int
+
+    Returns
+    -------
+    train_loader, val_loader : DataLoader
+    """
+
+    class _JetDataset(Dataset):
+        def __init__(self, features, masks, labels, features_jet2=None, masks_jet2=None):
+            self.features = features
+            self.features_jet2 = features_jet2
+            self.masks = masks
+            self.masks_jet2 = masks_jet2
+            self.labels = labels
+
+        def __len__(self):
+            return len(self.labels)
+
+        def __getitem__(self, idx):
+            out = {
+                "part_features": self.features[idx],
+                "part_mask": self.masks[idx],
+                "jet_type_labels": self.labels[idx],
+                "jet_features": torch.tensor([]),
+            }
+            if self.features_jet2 is not None:
+                out["part_features_jet2"] = self.features_jet2[idx]
+                out["part_mask_jet2"] = self.masks_jet2[idx]
+            return out
+
+    def _to_tensors(features_ak, labels_np, feature_names, max_seq_len):
+        padded, mask = ak_pad(
+            features_ak, maxlen=max_seq_len, axis=1, fill_value=0.0, return_mask=True
+        )
+        stacked = ak.concatenate(
+            [padded[f][..., np.newaxis] for f in feature_names], axis=-1
+        )
+        x = torch.from_numpy(ak.to_numpy(stacked)).float()
+        m = torch.from_numpy(ak.to_numpy(mask)).float()
+        y = torch.from_numpy(labels_np).long()
+        return x, m, y
+
+    feature_names = list(feature_dict.keys())
+
+    if jet_name in ["jet1", "jet2"]:
+        if train_val_split is not None:
+            print(
+                f"Loading CASE data and splitting "
+                f"{train_val_split:.1%}/{1-train_val_split:.1%} train/val..."
+            )
+            all_feats, all_labels = load_multiple_case_h5_files(
+                h5_files_train, feature_dict,
+                n_jets_per_file=n_jets_train, jet_name=jet_name,
+            )
+            n_total = len(all_feats)
+            n_train = int(n_total * train_val_split)
+            idx = np.random.permutation(n_total)
+            train_feats = all_feats[idx[:n_train]]
+            val_feats   = all_feats[idx[n_train:]]
+            train_labels = all_labels[idx[:n_train]]
+            val_labels   = all_labels[idx[n_train:]]
+        else:
+            train_feats, train_labels = load_multiple_case_h5_files(
+                h5_files_train, feature_dict,
+                n_jets_per_file=n_jets_train, jet_name=jet_name,
+            )
+            val_feats, val_labels = load_multiple_case_h5_files(
+                h5_files_val, feature_dict,
+                n_jets_per_file=n_jets_val, jet_name=jet_name,
+            )
+
+        train_x, train_m, train_y = _to_tensors(train_feats, train_labels, feature_names, max_sequence_len)
+        val_x,   val_m,   val_y   = _to_tensors(val_feats,   val_labels,   feature_names, max_sequence_len)
+
+        print(f"Train: {train_x.shape}  sig={train_y.sum()}  bg={(train_y==0).sum()}")
+        print(f"Val:   {val_x.shape}    sig={val_y.sum()}    bg={(val_y==0).sum()}")
+
+        train_dataset = _JetDataset(train_x, train_m, train_y)
+        val_dataset   = _JetDataset(val_x,   val_m,   val_y)
+
+    elif jet_name == "both":
+        if train_val_split is not None:
+            print(
+                f"Loading CASE dijet data and splitting "
+                f"{train_val_split:.1%}/{1-train_val_split:.1%} train/val..."
+            )
+            j1_all, j2_all, all_labels = load_multiple_case_h5_files(
+                h5_files_train, feature_dict,
+                n_jets_per_file=n_jets_train, jet_name="both",
+            )
+            n_total = len(j1_all)
+            n_train = int(n_total * train_val_split)
+            idx = np.random.permutation(n_total)
+            train_j1 = j1_all[idx[:n_train]]; val_j1 = j1_all[idx[n_train:]]
+            train_j2 = j2_all[idx[:n_train]]; val_j2 = j2_all[idx[n_train:]]
+            train_labels = all_labels[idx[:n_train]]
+            val_labels   = all_labels[idx[n_train:]]
+        else:
+            train_j1, train_j2, train_labels = load_multiple_case_h5_files(
+                h5_files_train, feature_dict,
+                n_jets_per_file=n_jets_train, jet_name="both",
+            )
+            val_j1, val_j2, val_labels = load_multiple_case_h5_files(
+                h5_files_val, feature_dict,
+                n_jets_per_file=n_jets_val, jet_name="both",
+            )
+
+        train_x1, train_m1, train_y = _to_tensors(train_j1, train_labels, feature_names, max_sequence_len)
+        train_x2, train_m2, _       = _to_tensors(train_j2, train_labels, feature_names, max_sequence_len)
+        val_x1,   val_m1,   val_y   = _to_tensors(val_j1,   val_labels,   feature_names, max_sequence_len)
+        val_x2,   val_m2,   _       = _to_tensors(val_j2,   val_labels,   feature_names, max_sequence_len)
+
+        print(f"Train: {train_x1.shape}  sig={train_y.sum()}  bg={(train_y==0).sum()}")
+        print(f"Val:   {val_x1.shape}    sig={val_y.sum()}    bg={(val_y==0).sum()}")
+
+        train_dataset = _JetDataset(train_x1, train_m1, train_y, features_jet2=train_x2, masks_jet2=train_m2)
+        val_dataset   = _JetDataset(val_x1,   val_m1,   val_y,   features_jet2=val_x2,   masks_jet2=val_m2)
+
+    else:
+        raise ValueError(f"jet_name must be 'jet1', 'jet2', or 'both', got {jet_name}")
+
+    train_loader = DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=shuffle_train,
+        num_workers=num_workers, pin_memory=True,
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size=batch_size, shuffle=False,
+        num_workers=num_workers, pin_memory=True,
+    )
+    return train_loader, val_loader
+
+
+def create_case_h5_test_loader(
+    h5_files_test,
+    feature_dict,
+    batch_size=64,
+    n_jets_test=None,
+    max_sequence_len=128,
+    jet_name="jet1",
+    shuffle_test=False,
+    num_workers=1,
+):
+    """Create a PyTorch DataLoader from CASE HDF5 files for evaluation.
+
+    Parameters
+    ----------
+    h5_files_test : list of str
+        HDF5 files to load (can mix background and signal files).
+    feature_dict : dict
+        Feature preprocessing dictionary.
+    batch_size : int
+        Batch size for dataloader
+    n_jets_test : int or list of int, optional
+        Events to load per file.
+    max_sequence_len : int
+        Maximum sequence length (padding)
+    jet_name : str
+        "jet1", "jet2", or "both".
+    shuffle_test : bool
+        Whether to shuffle test data
+    num_workers : int
+        Number of workers for data loading
+
+    Returns
+    -------
+    test_loader : DataLoader
+    """
+    feature_names = list(feature_dict.keys())
+
+    def _to_tensors(features_ak, labels_np, max_seq_len):
+        padded, mask = ak_pad(
+            features_ak, maxlen=max_seq_len, axis=1, fill_value=0.0, return_mask=True
+        )
+        stacked = ak.concatenate(
+            [padded[f][..., np.newaxis] for f in feature_names], axis=-1
+        )
+        x = torch.from_numpy(ak.to_numpy(stacked)).float()
+        m = torch.from_numpy(ak.to_numpy(mask)).bool()
+        y = torch.from_numpy(labels_np).long()
+        return x, m, y
+
+    if jet_name in ["jet1", "jet2"]:
+        feats, labels = load_multiple_case_h5_files(
+            h5_files_test, feature_dict,
+            n_jets_per_file=n_jets_test, jet_name=jet_name,
+        )
+
+        if shuffle_test:
+            idx = np.random.permutation(len(feats))
+            feats = feats[idx]; labels = labels[idx]
+
+        test_x, test_m, test_y = _to_tensors(feats, labels, max_sequence_len)
+        print(f"Test: {test_x.shape}  bg={(test_y==0).sum()}  sig={test_y.sum()}")
+
+        class _JetDataset(Dataset):
+            def __init__(self, x, m, y):
+                self.x, self.m, self.y = x, m, y
+            def __len__(self): return len(self.y)
+            def __getitem__(self, idx):
+                return {
+                    "part_features": self.x[idx],
+                    "part_mask": self.m[idx],
+                    "jet_type_labels": self.y[idx],
+                    "jet_features": torch.tensor([]),
+                }
+
+        test_dataset = _JetDataset(test_x, test_m, test_y)
+
+    elif jet_name == "both":
+        j1, j2, labels = load_multiple_case_h5_files(
+            h5_files_test, feature_dict,
+            n_jets_per_file=n_jets_test, jet_name="both",
+        )
+        if shuffle_test:
+            idx = np.random.permutation(len(j1))
+            j1 = j1[idx]; j2 = j2[idx]; labels = labels[idx]
+
+        test_x1, test_m1, test_y = _to_tensors(j1, labels, max_sequence_len)
+        test_x2, test_m2, _      = _to_tensors(j2, labels, max_sequence_len)
+        print(f"Test: {test_x1.shape}  bg={(test_y==0).sum()}  sig={test_y.sum()}")
+
+        class _DijetDataset(Dataset):
+            def __init__(self, x1, x2, m1, m2, y):
+                self.x1, self.x2, self.m1, self.m2, self.y = x1, x2, m1, m2, y
+            def __len__(self): return len(self.y)
+            def __getitem__(self, idx):
+                return {
+                    "part_features":      self.x1[idx],
+                    "part_features_jet2": self.x2[idx],
+                    "part_mask":          self.m1[idx],
+                    "part_mask_jet2":     self.m2[idx],
+                    "jet_type_labels":    self.y[idx],
+                    "jet_features":       torch.tensor([]),
+                }
+
+        test_dataset = _DijetDataset(test_x1, test_x2, test_m1, test_m2, test_y)
+
+    else:
+        raise ValueError(f"jet_name must be 'jet1', 'jet2', or 'both', got {jet_name}")
+
+    return DataLoader(
+        test_dataset, batch_size=batch_size, shuffle=False,
+        num_workers=num_workers, pin_memory=True,
+    )

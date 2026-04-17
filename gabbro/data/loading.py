@@ -911,7 +911,6 @@ def load_lhco_jets_from_h5(
         labels : np.ndarray
             Numpy array of jet labels (0=background, 1=signal)
     """
-
     # Handle "both" case by loading jet1 and jet2 separately
     if jet_name == "both":
         jet1_features, labels = load_lhco_jets_from_h5(
@@ -948,7 +947,7 @@ def load_lhco_jets_from_h5(
         labels_list = []
 
         # Loop over batches
-        for i in tqdm(range(n_batches), desc=f"Loading {os.path.basename(h5_filename)}"):
+        for i in tqdm(range(n_batches), desc=f"Loading {os.path.basename(h5_filename)} ({jet_name})"):
             start_idx = i * batch_size
             end_idx = min((i + 1) * batch_size, n_jets)
 
@@ -1256,6 +1255,214 @@ def load_multiple_h5_files(
         combined_labels = np.concatenate(all_labels)
 
         return combined_features, combined_labels
+
+
+def load_case_jets_from_h5(
+    h5_filename,
+    feature_dict: dict,
+    n_jets: int = None,
+    jet_name: str = "jet1",  # Options: "jet1", "jet2", "both"
+):
+    """Load CASE dijet events from an HDF5 file.
+
+    Parameters
+    ----------
+    h5_filename : str
+        Path to a CASE HDF5 file.  Both background and signal files share the
+        same per-jet keys:
+
+        - jet1_PFCands / jet2_PFCands : (N, 100, 4) float16
+          Columns are **[px, py, pz, E]** for each PF candidate.
+          Padding particles are all-zero.
+        - jet1_extraInfo / jet2_extraInfo : (N, 7) float32
+          Columns: [tau1, tau2, tau3, tau4, btag_score, ?, nPFCands]
+        - jet_kinematics : (N, 14) float32
+          Columns: [m_jj, delta_eta,
+                    j1_pt, j1_eta, j1_phi, j1_mass,
+                    j2_pt, j2_eta, j2_phi, j2_mass,
+                    j3_pt, j3_eta, j3_phi, j3_mass]
+        - truth_label : (N, 1) int  –  0 = background, 1 = signal
+
+    feature_dict : dict
+        Feature selection and preprocessing parameters.  Available keys:
+        part_pt, part_eta, part_phi, part_energy,
+        part_etarel, part_phirel, part_ptrel, part_erel,
+        part_deltaR, part_log_pt, part_log_energy,
+        part_log_ptrel, part_log_erel,
+        part_px, part_py, part_pz, part_mass.
+    n_jets : int, optional
+        Number of events to load.  None loads everything.
+    jet_name : str, optional
+        "jet1", "jet2", or "both".
+
+    Returns
+    -------
+    When jet_name is "jet1" or "jet2"
+        preprocessed_features : ak.Array
+        labels : np.ndarray  (0 = background, 1 = signal)
+
+    When jet_name is "both"
+        jet1_features, jet2_features : ak.Array
+        labels : np.ndarray
+    """
+    if jet_name == "both":
+        jet1_features, labels = load_case_jets_from_h5(
+            h5_filename=h5_filename,
+            feature_dict=feature_dict,
+            n_jets=n_jets,
+            jet_name="jet1",
+        )
+        jet2_features, _ = load_case_jets_from_h5(
+            h5_filename=h5_filename,
+            feature_dict=feature_dict,
+            n_jets=n_jets,
+            jet_name="jet2",
+        )
+        return jet1_features, jet2_features, labels
+
+    pf_key = "jet1_PFCands" if jet_name == "jet1" else "jet2_PFCands"
+    batch_size = 10000
+
+    with h5py.File(h5_filename, "r") as f:
+        total_jets = f[pf_key].shape[0]
+        n_jets = total_jets if n_jets is None else min(n_jets, total_jets)
+        n_batches = (n_jets + batch_size - 1) // batch_size
+
+        all_particle_features_list = []
+        labels_list = []
+
+        for i in tqdm(
+            range(n_batches),
+            desc=f"Loading {os.path.basename(h5_filename)} ({jet_name})",
+        ):
+            start = i * batch_size
+            end = min((i + 1) * batch_size, n_jets)
+
+            # (batch, 100, 4) float16 -> float32; columns are [px, py, pz, E]
+            pf_cands = f[pf_key][start:end].astype(np.float32)
+            labels_batch = f["truth_label"][start:end].squeeze(-1)  # (batch,)
+
+            # Mask: real particles have at least one non-zero component
+            mask = np.any(pf_cands != 0.0, axis=-1)  # (batch, 100)
+
+            # Build jagged (variable-length) arrays by applying the mask
+            px_jagged = ak.Array([pf_cands[j, mask[j], 0] for j in range(len(pf_cands))])
+            py_jagged = ak.Array([pf_cands[j, mask[j], 1] for j in range(len(pf_cands))])
+            pz_jagged = ak.Array([pf_cands[j, mask[j], 2] for j in range(len(pf_cands))])
+            E_jagged  = ak.Array([pf_cands[j, mask[j], 3] for j in range(len(pf_cands))])
+
+            # Four-momentum (vector library handles kinematics)
+            p4 = ak.zip(
+                {"px": px_jagged, "py": py_jagged, "pz": pz_jagged, "energy": E_jagged},
+                with_name="Momentum4D",
+            )
+            jet_p4 = ak.sum(p4, axis=1)
+
+            pt     = p4.pt
+            eta    = p4.eta
+            phi    = p4.phi
+            energy = p4.energy
+            mass   = p4.mass
+
+            batch_feats = ak.Array(
+                {
+                    "part_pt":         pt,
+                    "part_eta":        eta,
+                    "part_phi":        phi,
+                    "part_energy":     energy,
+                    "part_energy_raw": energy,
+                    "part_mass":       mass,
+                    "part_px":         px_jagged,
+                    "part_py":         py_jagged,
+                    "part_pz":         pz_jagged,
+                    "part_etarel":     p4.deltaeta(jet_p4),
+                    "part_phirel":     p4.deltaphi(jet_p4),
+                    "part_ptrel":      pt / jet_p4.pt,
+                    "part_erel":       energy / jet_p4.energy,
+                    "part_deltaR":     p4.deltaR(jet_p4),
+                    "part_log_pt":     np.log(pt + 1e-8),
+                    "part_log_energy": np.log(energy + 1e-8),
+                    "part_log_ptrel":  np.log(pt / jet_p4.pt + 1e-8),
+                    "part_log_erel":   np.log(energy / jet_p4.energy + 1e-8),
+                }
+            )
+
+            all_particle_features_list.append(batch_feats)
+            labels_list.append(labels_batch)
+
+    all_particle_features = ak.concatenate(all_particle_features_list)
+    all_labels = np.concatenate(labels_list).astype(int)
+
+    preprocessed_features = ak_select_and_preprocess(
+        all_particle_features, pp_dict=feature_dict
+    )
+    return preprocessed_features, all_labels
+
+
+def load_multiple_case_h5_files(
+    h5_filenames: list,
+    feature_dict: dict,
+    n_jets_per_file: int | list = None,
+    jet_name: str = "jet1",  # Options: "jet1", "jet2", "both"
+):
+    """Load and concatenate multiple CASE HDF5 files.
+
+    Parameters
+    ----------
+    h5_filenames : list of str
+        Paths to CASE HDF5 files.
+    feature_dict : dict
+        Feature selection and preprocessing parameters.
+    n_jets_per_file : int or list of int, optional
+        Number of events per file.  If ``int``, the same limit is used for
+        every file.  If ``list``, it must match *h5_filenames* in length.
+        ``None`` loads all events from every file.
+    jet_name : str, optional
+        ``"jet1"``, ``"jet2"``, or ``"both"``.
+
+    Returns
+    -------
+    See :func:`load_case_jets_from_h5` for return signatures.
+    """
+    if n_jets_per_file is None:
+        n_jets_list = [None] * len(h5_filenames)
+    elif isinstance(n_jets_per_file, int):
+        n_jets_list = [n_jets_per_file] * len(h5_filenames)
+    elif isinstance(n_jets_per_file, list):
+        if len(n_jets_per_file) != len(h5_filenames):
+            raise ValueError(
+                f"Length of n_jets_per_file ({len(n_jets_per_file)}) "
+                f"must match length of h5_filenames ({len(h5_filenames)})"
+            )
+        n_jets_list = n_jets_per_file
+    else:
+        raise TypeError(
+            f"n_jets_per_file must be int, list, or None, got {type(n_jets_per_file)}"
+        )
+
+    if jet_name == "both":
+        all_jet1, all_jet2, all_labels = [], [], []
+        for fname, n_jets in zip(h5_filenames, n_jets_list):
+            j1, j2, labels = load_case_jets_from_h5(
+                fname, feature_dict, n_jets=n_jets, jet_name="both"
+            )
+            all_jet1.append(j1)
+            all_jet2.append(j2)
+            all_labels.append(labels)
+        return (
+            ak.concatenate(all_jet1),
+            ak.concatenate(all_jet2),
+            np.concatenate(all_labels),
+        )
+    elif jet_name in ["jet1", "jet2"]:
+        all_feats, all_labels = [], []
+        for fname, n_jets in zip(h5_filenames, n_jets_list):
+            feats, labels = load_case_jets_from_h5(
+                fname, feature_dict, n_jets=n_jets, jet_name=jet_name
+            )
+            all_feats.append(feats)
+            all_labels.append(labels)
+        return ak.concatenate(all_feats), np.concatenate(all_labels)
 
 
 def create_mini_root_file(input_file, output_file, max_entries=1000):

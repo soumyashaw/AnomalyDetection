@@ -1,0 +1,37 @@
+================================================================================
+ANOMALY DETECTION MODEL EVALUATION
+================================================================================
+
+Checkpoint: aachen_head_expts/run_optim_weak_5k_pretrain_class10M_freeze_aachen_20260420_010653/checkpoints/epoch=13_val_argos=4.2270.ckpt
+Evaluation Time: 2026-04-20 11:57:06
+Device: cuda:0
+
+--------------------------------------------------------------------------------
+METRICS
+--------------------------------------------------------------------------------
+ROC AUC:              0.9728
+Average Precision:    0.9557
+Accuracy:             0.9672
+Sensitivity (TPR):    0.9100
+Specificity (TNR):    0.9815
+Threshold Used:       0.5000
+Optimal Threshold:    0.4652
+R30 (30% TPR):        40000.0000
+R30 Actual TPR:       0.3
+R30 Status:           ok
+Max SIC:                  63.2693
+
+--------------------------------------------------------------------------------
+DATA STATISTICS
+--------------------------------------------------------------------------------
+Total Samples:        250000
+Signal Jets:          50000
+Background Jets:      200000
+
+--------------------------------------------------------------------------------
+CONFUSION MATRIX
+--------------------------------------------------------------------------------
+True Negatives:  196297
+False Positives: 3703
+False Negatives: 4499
+True Positives:  45501

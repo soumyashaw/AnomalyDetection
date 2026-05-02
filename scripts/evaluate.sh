@@ -10,7 +10,7 @@ cd $HOME/AnomalyDetection
 apptainer exec --nv $IMG bash -c "
     source /opt/conda/bin/activate
     cd \"$HOME/AnomalyDetection\"
-    python -m src.eval.evaluate_true_roc --checkpoint_folder dijet_expts/run_20260312_170307/checkpoints/ --model_type dijet
+    python -m src.eval.evaluate_CASE --checkpoint_folder dijet_expts/run_20260312_170307/checkpoints/ --model_type dijet
     "   
 
 echo "Job finished."

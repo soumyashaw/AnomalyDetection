@@ -2,8 +2,8 @@
 echo "Job started on: $(hostname)"
 
 IMG="/.automount/net_rw/net__data_ttk/soshaw/apptainer_images/gabbro.sif"
-checkpoint_path="/.automount/home/home__home3/institut_thp/soshaw/omnijet_alpha_AD/logs/omnijet-multihead/runs/2026-04-17_00-20-24_lx3agpu2_UncomplimentaryCoachbuilder/checkpoints/best.ckpt"
-output_name="pretrained_class_100M"
+checkpoint_path="/.automount/home/home__home3/institut_thp/soshaw/omnijet_alpha_AD/logs/vicreg_train_contrastive_20260419_163253/checkpoints/best-20260419_163253_train_contrastive.ckpt"
+output_name="contrastive"
 plot_path="backbone_weights/$output_name/"
 
 # Set your wandb API key

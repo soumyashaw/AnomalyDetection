@@ -78,6 +78,92 @@ def _to_attrdict(obj):
     return obj
 
 
+def _complete_backbone_hparams(hparams, state_dict=None):
+    """
+    Add missing hyperparameters needed for BackboneTransformer with sensible defaults.
+    
+    This is useful when loading checkpoints from models that only saved minimal hyperparameters
+    (e.g., contrastive learning models that only saved embedding_dim and particle_features_dict).
+    
+    Parameters
+    ----------
+    hparams : dict
+        Existing hyperparameters from checkpoint
+    state_dict : dict, optional
+        Model state_dict to infer architecture from (e.g., number of blocks)
+    
+    Returns
+    -------
+    dict
+        Complete hyperparameters with defaults added for missing keys
+    """
+    hparams = dict(hparams)  # Copy to avoid modifying original
+    
+    # Infer n_blocks from state_dict if available
+    n_blocks = 8  # default
+    if state_dict is not None:
+        block_keys = [k for k in state_dict.keys() if k.startswith('transformer.blocks.')]
+        if block_keys:
+            block_indices = [int(k.split('.')[2]) for k in block_keys if k.split('.')[2].isdigit()]
+            if block_indices:
+                n_blocks = max(block_indices) + 1
+    
+    # Infer n_registers from state_dict
+    n_registers = 0
+    if state_dict is not None and 'registers' in state_dict:
+        # registers shape is (1, n_registers, embedding_dim)
+        n_registers = state_dict['registers'].shape[1]
+    
+    # Check if model has jet features
+    has_jet_features = False
+    if state_dict is not None:
+        jet_keys = [k for k in state_dict.keys() if 'embed_jet' in k]
+        has_jet_features = len(jet_keys) > 0
+    
+    # Check what's missing and add defaults
+    defaults = {
+        'max_sequence_len': 128,
+        'vocab_size': 8194,
+        'n_registers': n_registers,
+        'apply_causal_mask': False,  # Most evaluation tasks don't need causal mask
+        'embed_cfg': {
+            'type': 'continuous_project_add',
+            'intermediate_dim': None,
+        },
+        'transformer_cfg': {
+            'dim': hparams.get('embedding_dim', 128),
+            'n_blocks': n_blocks,
+            'norm_after_blocks': True,
+            'residual_cfg': {
+                'gate_type': 'local',
+                'init_value': 1,
+            },
+            'attn_cfg': {
+                'num_heads': 8,
+                'dropout_rate': 0.1,
+                'norm_before': True,
+                'norm_after': False,
+            },
+            'mlp_cfg': {
+                'dropout_rate': 0.0,
+                'norm_before': True,
+                'expansion_factor': 4,
+                'activation': 'GELU',
+            },
+        },
+        'interaction_cfg': None,
+        'jet_features_dict': None,  # Will be set if model has jet features
+        'feature_drop_cfg': None,
+    }
+    
+    # Only add defaults for keys that are missing
+    for key, default_value in defaults.items():
+        if key not in hparams:
+            hparams[key] = default_value
+    
+    return hparams
+
+
 class DataCache:
     """Cache loaded HDF5 data to avoid repeated disk I/O."""
     
@@ -368,6 +454,16 @@ class EmbeddingExtractor:
                 else:
                     print(f"Instantiating BackboneTransformer with {len(hparams)} hyperparameters...")
                     print(f"Hyperparameters keys: {list(hparams.keys())}")
+                    
+                    # Add missing hyperparameters with sensible defaults
+                    # This is needed for checkpoints that only saved minimal hparams (e.g., contrastive models)
+                    if 'embed_cfg' not in hparams or 'transformer_cfg' not in hparams:
+                        print(f"\n⚠ Warning: Checkpoint missing configuration keys (embed_cfg, transformer_cfg, etc.)")
+                        print(f"   This is common for contrastive/pretraining checkpoints.")
+                        print(f"   Adding default configuration based on typical architecture...")
+                        hparams = _complete_backbone_hparams(hparams, state_dict=backbone_state)
+                        print(f"   ✓ Configuration completed. New keys: {list(hparams.keys())}")
+                    
                     try:
                         # BackboneTransformer expects cfg objects with attribute access (e.g. embed_cfg.type).
                         hparams_for_model = _to_attrdict(hparams)
@@ -391,7 +487,18 @@ class EmbeddingExtractor:
                             f"Missing required hyperparameters for BackboneTransformer. "
                             f"Expected 'embedding_dim' and other parameters, but got: {list(hparams.keys())}"
                         )
-                    self.model.load_state_dict(backbone_state)
+                    
+                    # Load state_dict with strict=False to handle minor mismatches
+                    # (e.g., jet features or registers that may differ from checkpoint)
+                    missing_keys, unexpected_keys = self.model.load_state_dict(backbone_state, strict=False)
+                    if missing_keys:
+                        print(f"⚠ Warning: Missing keys in checkpoint (will use random initialization):")
+                        for key in missing_keys:
+                            print(f"  - {key}")
+                    if unexpected_keys:
+                        print(f"⚠ Warning: Unexpected keys in checkpoint (will be ignored):")
+                        for key in unexpected_keys:
+                            print(f"  - {key}")
                     print(f"✓ Loaded {len(backbone_state)} backbone weight tensors")
             else:
                 raise ValueError(

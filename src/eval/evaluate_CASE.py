@@ -24,6 +24,7 @@ USAGE: python -m src.eval.evaluate_CASE --checkpoint path/to/checkpoint.ckpt --m
 """
 import os
 import json
+import sys
 import torch
 import glob
 import argparse
@@ -36,6 +37,12 @@ from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
 from gabbro.data.data_utils import create_case_h5_test_loader
+
+# Per-file cache helpers (shared with scripts/cache_case_data.py)
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+from src.eval.cache_case_data import per_file_cache_path, DEFAULT_FEATURE_DICT as _CACHE_FEATURE_DICT  # noqa: E402
 from sklearn.metrics import (
     roc_curve, auc, confusion_matrix, classification_report,
     precision_recall_curve, average_precision_score
@@ -49,6 +56,94 @@ from gabbro.models.backbone import (
 )
 
 load_dotenv()  # Load environment variables from .env file (for W&B API key, etc.)
+
+
+def load_from_per_file_caches(
+    h5_files: list,
+    cache_dir,
+    jet_name: str,
+    n_jets,
+    feature_dict: dict,
+    model_type: str = "aachen",
+):
+    """Load tensors from per-file caches produced by scripts/cache_case_data.py.
+
+    Parameters
+    ----------
+    h5_files : list of str
+        HDF5 file paths whose caches should be loaded.  The function will
+        report which files are missing from the cache.
+    cache_dir : Path or str
+        Directory containing per-file .pkl caches.
+    jet_name : str
+        "jet1", "jet2", or "both" (must match what was used when caching).
+    n_jets : int or None
+        Events per file (must match what was used when caching).
+    feature_dict : dict
+        Feature dict (must match what was used when caching).
+    model_type : str
+        "single", "dijet", or "aachen".  Controls which keys are expected.
+
+    Returns
+    -------
+    dict or None
+        Concatenated tensor dict compatible with ``create_loader_from_cached_data``,
+        or None if no per-file caches were found.
+    """
+    cache_dir = Path(cache_dir)
+    all_features, all_masks, all_labels = [], [], []
+    all_features_jet2, all_masks_jet2 = [], []
+    n_found = 0
+    n_missing = 0
+
+    for h5_path in h5_files:
+        pkl = per_file_cache_path(h5_path, cache_dir, jet_name, n_jets, feature_dict)
+        if not pkl.exists():
+            print(f"  [MISSING] {pkl.name}")
+            n_missing += 1
+            continue
+        try:
+            with open(pkl, "rb") as f:
+                data = pickle.load(f)
+        except Exception as exc:
+            print(f"  [ERROR] Failed to load {pkl.name}: {exc}")
+            n_missing += 1
+            continue
+
+        all_features.append(data["features"])
+        all_masks.append(data["masks"])
+        all_labels.append(data["labels"])
+        if model_type in ["dijet", "aachen"] and "features_jet2" in data:
+            all_features_jet2.append(data["features_jet2"])
+            all_masks_jet2.append(data["masks_jet2"])
+        n_found += 1
+        print(f"  [OK] {pkl.name}  ({data['labels'].shape[0]} events)")
+
+    if n_found == 0:
+        print("No per-file caches found.")
+        return None
+
+    if n_missing > 0:
+        print(f"\nWARNING: {n_missing} file(s) not found in cache — "
+              "they will be excluded from the dataset.")
+        print("Run scripts/cache_case_data.py first (possibly across multiple nodes) "
+              "to cache all files.\n")
+
+    result = {
+        "features": torch.cat(all_features, dim=0),
+        "masks":    torch.cat(all_masks,    dim=0),
+        "labels":   torch.cat(all_labels,   dim=0),
+    }
+    if model_type in ["dijet", "aachen"] and all_features_jet2:
+        result["features_jet2"] = torch.cat(all_features_jet2, dim=0)
+        result["masks_jet2"]    = torch.cat(all_masks_jet2,    dim=0)
+
+    n_total = result["labels"].shape[0]
+    n_bg    = (result["labels"] == 0).sum().item()
+    n_sig   = (result["labels"] == 1).sum().item()
+    print(f"\nPer-file cache loaded: {n_total} events  "
+          f"(bg={n_bg}, sig={n_sig})  from {n_found} file(s)")
+    return result
 
 
 class AttrDict(dict):
@@ -75,8 +170,10 @@ class DataCache:
     
     def _get_cache_key(self, h5_files, n_jets, feature_dict, max_sequence_len, model_type="single"):
         """Generate unique cache key based on data configuration."""
-        # Create a string representation of the configuration
-        config_str = f"{h5_files}_{n_jets}_{feature_dict}_{max_sequence_len}_{model_type}"
+        # Include full file paths to distinguish different datasets
+        # Sort paths for consistency
+        sorted_files = sorted([str(Path(f).absolute()) for f in h5_files])
+        config_str = f"{sorted_files}_{n_jets}_{feature_dict}_{max_sequence_len}_{model_type}"
         # Hash it to get a short, unique filename
         hash_obj = hashlib.md5(config_str.encode())
         return hash_obj.hexdigest()
@@ -84,10 +181,26 @@ class DataCache:
     def get_cache_path(self, h5_files, n_jets, feature_dict, max_sequence_len, model_type="single"):
         """Generate cache filename."""
         cache_key = self._get_cache_key(h5_files, n_jets, feature_dict, max_sequence_len, model_type)
-        file_str = "_".join([Path(f).stem for f in h5_files])
-        n_jets_str = "_".join(map(str, n_jets))
+        
+        # Create a short identifier from first and last file
+        if len(h5_files) > 2:
+            file_str = f"{Path(h5_files[0]).stem}_to_{Path(h5_files[-1]).stem}_{len(h5_files)}files"
+        elif len(h5_files) == 2:
+            file_str = f"{Path(h5_files[0]).stem}_{Path(h5_files[1]).stem}"
+        else:
+            file_str = Path(h5_files[0]).stem
+        
+        # Handle n_jets as int, None, or list
+        if n_jets is None:
+            n_jets_str = "all"
+        elif isinstance(n_jets, (list, tuple)):
+            n_jets_str = "_".join(map(str, n_jets))
+        else:
+            n_jets_str = str(n_jets)
+        
         type_str = "dijet" if model_type in ["dijet", "aachen"] else "single"
-        return self.cache_dir / f"data_{type_str}_{file_str}_{n_jets_str}_{cache_key}.pkl"
+        # Use only the hash for uniqueness - the other parts are just for readability
+        return self.cache_dir / f"case_{type_str}_{n_jets_str}_{cache_key}.pkl"
     
     def load(self, h5_files, n_jets, feature_dict, max_sequence_len, model_type="single"):
         """Load dataset from cache if available."""
@@ -170,7 +283,7 @@ def extract_data_from_loader(dataloader, model_type="single"):
     return result
 
 
-def create_loader_from_cached_data(cached_data, batch_size, model_type="single"):
+def create_loader_from_cached_data(cached_data, batch_size, model_type="single", num_workers=0):
     """Create a DataLoader from cached tensor data.
     
     Parameters
@@ -183,6 +296,8 @@ def create_loader_from_cached_data(cached_data, batch_size, model_type="single")
         Batch size for DataLoader
     model_type : str
         Type of model: "single", "dijet", or "aachen"
+    num_workers : int
+        Number of worker processes for data loading (default: 0 for cached data)
         
     Returns
     -------
@@ -248,8 +363,10 @@ def create_loader_from_cached_data(cached_data, batch_size, model_type="single")
         dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=0,  # No need for workers with cached data
+        num_workers=num_workers,
         pin_memory=True,
+        persistent_workers=num_workers > 0,  # Keep workers alive between epochs if using workers
+        prefetch_factor=2 if num_workers > 0 else None,  # Prefetch 2 batches per worker
     )
 
 
@@ -882,13 +999,25 @@ def main():
                        help="Directory to save evaluation results")
     parser.add_argument("--gpu_id", type=int, default=int(os.getenv("GPU_ID", "0")),
                        help="GPU ID to use for evaluation")
+    parser.add_argument("--num_workers", type=int, default=4,
+                       help="Number of CPU workers for data loading (0 = main process only)")
     parser.add_argument("--clear_cache", action="store_true",
                        help="Clear cached data and reload from HDF5 files")
+    parser.add_argument("--cache_dir", type=str, default='/.automount/net_rw/net__data_ttk/soshaw/CASE/.cache/evaluation_case',
+                       help="Directory of per-file .pkl caches produced by "
+                            "scripts/cache_case_data.py.  When supplied the "
+                            "script loads each file's cache independently "
+                            "(fast, multi-node friendly) instead of the "
+                            "monolithic whole-dataset cache.")
     args = parser.parse_args()
+    
+    # Performance tip about num_workers
+    if args.num_workers > 0:
+        print(f"Using {args.num_workers} CPU workers for parallel data loading")
     
     # Clear cache if requested
     if args.clear_cache:
-        cache_dir = Path(".cache/evaluation")
+        cache_dir = Path(".cache/evaluation_case")
         if cache_dir.exists():
             import shutil
             print(f"Clearing cache directory: {cache_dir}")
@@ -937,51 +1066,78 @@ def main():
         jet_name = "jet1"
         print("Loading single jet for evaluation...")
 
-    # Initialize cache
-    cache = DataCache(cache_dir=".cache/evaluation")
-    
-    # Try to load from cache (works for both single-jet and dijet models now)
-    print("Checking for cached data...")
-    cached_data = cache.load(
-        h5_files=h5_files_test,
-        n_jets=args.n_jets_test,
-        feature_dict=input_features_dict,
-        max_sequence_len=128,
-        model_type=args.model_type
-    )
-    
-    if cached_data is not None:
-        # Create DataLoader from cached data
-        print("Creating DataLoader from cached data...")
-        test_loader = create_loader_from_cached_data(cached_data, args.batch_size, args.model_type)
-    else:
-        # Load from HDF5 files
-        print(f"Loading test data from CASE HDF5 files (jet_name={jet_name})...")
-        test_loader = create_case_h5_test_loader(
-            h5_files_test=h5_files_test,
-            feature_dict=input_features_dict,
-            batch_size=args.batch_size,
-            n_jets_test=args.n_jets_test,
-            max_sequence_len=128,
+    # -----------------------------------------------------------------------
+    # Data loading: per-file cache (preferred) or monolithic cache / HDF5
+    # -----------------------------------------------------------------------
+    if args.cache_dir is not None:
+        # --- Fast path: per-file caches from scripts/cache_case_data.py ---
+        print(f"Loading from per-file cache directory: {args.cache_dir}")
+        cached_data = load_from_per_file_caches(
+            h5_files=h5_files_test,
+            cache_dir=args.cache_dir,
             jet_name=jet_name,
-            shuffle_test=False,
-            num_workers=1,
+            n_jets=args.n_jets_test,
+            feature_dict=input_features_dict,
+            model_type=args.model_type,
         )
-        
-        # Extract and cache the data for future runs
-        print("Caching loaded data for future evaluations...")
-        cached_data = extract_data_from_loader(test_loader, model_type=args.model_type)
-        cache.save(
-            data_dict=cached_data,
+        if cached_data is None:
+            print("ERROR: No per-file caches found in the supplied --cache_dir.")
+            print("Run scripts/cache_case_data.py first to populate the cache.")
+            raise SystemExit(1)
+        test_loader = create_loader_from_cached_data(
+            cached_data, args.batch_size, args.model_type, num_workers=args.num_workers
+        )
+    else:
+        # --- Legacy path: monolithic whole-dataset cache or raw HDF5 ---
+        # Initialize cache (CASE-specific to avoid LHCO collision)
+        cache = DataCache(cache_dir=".cache/evaluation_case")
+
+        # Try to load from cache (works for both single-jet and dijet models now)
+        print("Checking for cached data...")
+        cached_data = cache.load(
             h5_files=h5_files_test,
             n_jets=args.n_jets_test,
             feature_dict=input_features_dict,
             max_sequence_len=128,
             model_type=args.model_type
         )
-        
-        # Recreate loader from cached data to ensure consistent behavior
-        test_loader = create_loader_from_cached_data(cached_data, args.batch_size, args.model_type)
+
+        if cached_data is not None:
+            # Create DataLoader from cached data
+            print(f"Creating DataLoader from cached data (num_workers={args.num_workers})...")
+            test_loader = create_loader_from_cached_data(
+                cached_data, args.batch_size, args.model_type, num_workers=args.num_workers
+            )
+        else:
+            # Load from HDF5 files
+            print(f"Loading test data from CASE HDF5 files (jet_name={jet_name}, num_workers={args.num_workers})...")
+            test_loader = create_case_h5_test_loader(
+                h5_files_test=h5_files_test,
+                feature_dict=input_features_dict,
+                batch_size=args.batch_size,
+                n_jets_test=args.n_jets_test,
+                max_sequence_len=128,
+                jet_name=jet_name,
+                shuffle_test=False,
+                num_workers=args.num_workers,
+            )
+
+            # Extract and cache the data for future runs
+            print("Caching loaded data for future evaluations...")
+            cached_data = extract_data_from_loader(test_loader, model_type=args.model_type)
+            cache.save(
+                data_dict=cached_data,
+                h5_files=h5_files_test,
+                n_jets=args.n_jets_test,
+                feature_dict=input_features_dict,
+                max_sequence_len=128,
+                model_type=args.model_type
+            )
+
+            # Recreate loader from cached data to ensure consistent behavior
+            test_loader = create_loader_from_cached_data(
+                cached_data, args.batch_size, args.model_type, num_workers=args.num_workers
+            )
     
     # Initialize evaluator and run evaluation
     evaluator = ModelEvaluator(

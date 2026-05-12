@@ -487,7 +487,15 @@ class ModelEvaluator:
         predictions = np.concatenate(all_preds)
         labels = np.concatenate(all_labels)
         logits = np.concatenate(all_logits)
-        
+
+        # Binarize labels: CASE truth_label is 0 for background and a positive
+        # integer (possibly > 1 for different signal processes) for signal.
+        # All downstream metrics expect a binary {0, 1} array.
+        unique_labels = np.unique(labels)
+        if len(unique_labels) > 2 or (len(unique_labels) == 2 and unique_labels.max() != 1):
+            print(f"Binarizing labels: unique values {unique_labels} → {{0, 1}}")
+            labels = (labels > 0).astype(int)
+
         print(f"Generated predictions for {len(predictions)} samples")
         return predictions, labels, logits
     
@@ -995,7 +1003,7 @@ def main():
                        help="Number of jets per file for testing (None = all)")
     parser.add_argument("--threshold", type=float, default=0.5,
                        help="Classification threshold")
-    parser.add_argument("--output_dir", type=str, default=os.getenv("OUTPUT_DIR", "evaluation_results"),
+    parser.add_argument("--output_dir", type=str, default=str(os.getenv("OUTPUT_DIR")),
                        help="Directory to save evaluation results")
     parser.add_argument("--gpu_id", type=int, default=int(os.getenv("GPU_ID", "0")),
                        help="GPU ID to use for evaluation")

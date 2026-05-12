@@ -592,7 +592,12 @@ def create_custom_lhco_h5_dataloaders(
                 )
                 # if filename has "supp" in it, change the labels to all 1s (signal)
                 if "supp" in filename:
-                    labels = np.ones_like(labels)
+                    print(f"Original labels for {filename}: {labels[0]}")
+                    if labels[0] == 0:
+                        labels = np.ones_like(labels)
+                    elif labels[0] == 1:
+                        labels = np.zeros_like(labels)
+                    print(f"Modified labels for {filename} (supplementary data): {labels[0]}")
                 all_features_jet1.append(features_jet1)
                 all_features_jet2.append(features_jet2)
                 all_labels.append(labels)

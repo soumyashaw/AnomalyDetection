@@ -102,18 +102,51 @@ def _lock_path(cache_pkl: Path) -> Path:
     return cache_pkl.with_suffix(".lock")
 
 
-def _try_acquire_lock(cache_pkl: Path) -> bool:
-    """Attempt to atomically create a .lock file.  Returns True on success."""
-    lock = _lock_path(cache_pkl)
+def _pid_alive(pid: int) -> bool:
+    """Return True if the process with the given PID is still running."""
     try:
-        fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(fd, str(os.getpid()).encode())
-        os.close(fd)
+        os.kill(pid, 0)  # signal 0 = check existence only
         return True
-    except OSError as exc:
-        if exc.errno == errno.EEXIST:
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists but we can't signal it
+
+
+def _try_acquire_lock(cache_pkl: Path) -> bool:
+    """Attempt to atomically create a .lock file.  Returns True on success.
+
+    If a lock file exists but the owning PID is no longer running (stale lock),
+    the lock is removed and re-acquired by the current process.
+    """
+    lock = _lock_path(cache_pkl)
+    while True:
+        try:
+            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            return True
+        except OSError as exc:
+            if exc.errno != errno.EEXIST:
+                raise
+            # Lock exists — check if the owning process is still alive
+            try:
+                pid_str = lock.read_text().strip()
+                pid = int(pid_str)
+            except Exception:
+                # Unreadable lock — treat as stale
+                pid = None
+
+            if pid is None or not _pid_alive(pid):
+                print(f"[LOCK] Removing stale lock (PID {pid}): {lock.name}")
+                try:
+                    lock.unlink()
+                except FileNotFoundError:
+                    pass
+                # Loop back and try to acquire again
+                continue
+
             return False
-        raise
 
 
 def _release_lock(cache_pkl: Path):
@@ -157,11 +190,11 @@ def cache_single_file(h5_path: str, cache_pkl: Path, jet_name: str,
         return False
 
     if not _try_acquire_lock(cache_pkl):
-        # Another worker is processing this file
+        # Another live worker is processing this file
         lock_path = _lock_path(cache_pkl)
         try:
             pid = lock_path.read_text().strip()
-            print(f"[SKIP] Lock held by PID {pid}: {cache_pkl.name}")
+            print(f"[SKIP] Lock held by live PID {pid}: {cache_pkl.name}")
         except Exception:
             print(f"[SKIP] Locked: {cache_pkl.name}")
         return False

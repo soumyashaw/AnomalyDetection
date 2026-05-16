@@ -15,10 +15,12 @@ apptainer exec --nv "$IMG" bash -lc '
     source /opt/conda/bin/activate
     cd "$HOME/AnomalyDetection"
 
-    python -m src.train.train_cwola_aachen --naming_identifier weak_cwola_pretrained_freeze_aachen --pretrained_ckpt backbone_weights/pretrained_class_1M_each/backbone.ckpt --load_pretrained --freeze_backbone --use_hpc --use_wandb
+    python -m src.train.train_cwola_aachen --naming_identifier weak_cwola_pretrained_freeze_aachen_seed256 --pretrained_ckpt backbone_weights/pretrained_class_1M_each/backbone.ckpt --load_pretrained --freeze_backbone --use_hpc --use_wandb
+
 '
 
 echo "Job finished."
 
-# python -m src.train.train_cwola_aachen --naming_identifier weak_cwola_pretrained_update_aachen --pretrained_ckpt backbone_weights/pretrained_class_1M_each/backbone.ckpt --load_pretrained --update_backbone --use_hpc --use_wandb
+# python -m src.train.train_cwola_aachen --naming_identifier weak_cwola_aachen_seed2 --use_hpc --use_wandb
+# python -m src.train.train_cwola_aachen --naming_identifier weak_cwola_pretrained_update_aachen_seed17 --pretrained_ckpt backbone_weights/pretrained_class_1M_each/backbone.ckpt --load_pretrained --update_backbone --use_hpc --use_wandb
 # python -m src.train.train_cwola_aachen --naming_identifier weak_cwola_pretrained_freeze_aachen --pretrained_ckpt backbone_weights/pretrained_class_1M_each/backbone.ckpt --load_pretrained --freeze_backbone --use_hpc --use_wandb

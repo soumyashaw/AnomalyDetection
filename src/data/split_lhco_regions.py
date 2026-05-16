@@ -98,6 +98,7 @@ def sample_events(
     n_background_total: int = 200000,
     n_signal_total: int = 1000,
     random_seed: int = 42,
+    sr_fraction_std: float = 0.05,
 ) -> Dict[str, np.ndarray]:
     """Randomly sample events to meet target counts.
     
@@ -111,6 +112,8 @@ def sample_events(
         Total number of signal events to sample (SR + SB)
     random_seed : int
         Random seed for reproducibility
+    sr_fraction_std : float
+        Standard deviation for SR/SB split variation (default 0.05 = 5%)
         
     Returns
     -------
@@ -131,14 +134,19 @@ def sample_events(
     print(f"  Signal SR: {n_sig_sr_avail}")
     print(f"  Signal SB: {n_sig_sb_avail}")
     
-    # Calculate proportions to maintain SR/SB ratio
+    # Calculate base proportions from available data
     # For background
     bg_total_avail = n_bg_sr_avail + n_bg_sb_avail
     if bg_total_avail < n_background_total:
         print(f"\nWarning: Only {bg_total_avail} background events available, using all")
         n_background_total = bg_total_avail
     
-    bg_sr_fraction = n_bg_sr_avail / bg_total_avail if bg_total_avail > 0 else 0
+    bg_sr_fraction_base = n_bg_sr_avail / bg_total_avail if bg_total_avail > 0 else 0
+    
+    # Add random variation to the SR fraction (seed-dependent)
+    bg_sr_fraction_delta = rng.normal(0, sr_fraction_std)
+    bg_sr_fraction = np.clip(bg_sr_fraction_base + bg_sr_fraction_delta, 0.1, 0.9)
+    
     n_bg_sr_sample = min(int(n_background_total * bg_sr_fraction), n_bg_sr_avail)
     n_bg_sb_sample = min(n_background_total - n_bg_sr_sample, n_bg_sb_avail)
     
@@ -148,11 +156,18 @@ def sample_events(
         print(f"Warning: Only {sig_total_avail} signal events available, using all")
         n_signal_total = sig_total_avail
     
-    sig_sr_fraction = n_sig_sr_avail / sig_total_avail if sig_total_avail > 0 else 0
+    sig_sr_fraction_base = n_sig_sr_avail / sig_total_avail if sig_total_avail > 0 else 0
+    
+    # Add random variation to the SR fraction (seed-dependent)
+    sig_sr_fraction_delta = rng.normal(0, sr_fraction_std)
+    sig_sr_fraction = np.clip(sig_sr_fraction_base + sig_sr_fraction_delta, 0.1, 0.9)
+    
     n_sig_sr_sample = min(int(n_signal_total * sig_sr_fraction), n_sig_sr_avail)
     n_sig_sb_sample = min(n_signal_total - n_sig_sr_sample, n_sig_sb_avail)
     
-    print(f"\nSampling strategy:")
+    print(f"\nSampling strategy (seed={random_seed}):")
+    print(f"  Background SR fraction: {bg_sr_fraction_base:.3f} → {bg_sr_fraction:.3f} (Δ={bg_sr_fraction_delta:+.3f})")
+    print(f"  Signal SR fraction: {sig_sr_fraction_base:.3f} → {sig_sr_fraction:.3f} (Δ={sig_sr_fraction_delta:+.3f})")
     print(f"  Background SR: {n_bg_sr_sample} / {n_bg_sr_avail}")
     print(f"  Background SB: {n_bg_sb_sample} / {n_bg_sb_avail}")
     print(f"  Signal SR: {n_sig_sr_sample} / {n_sig_sr_avail}")
@@ -187,6 +202,8 @@ def copy_events_to_h5(
     input_file: str,
     output_file: str,
     indices: np.ndarray,
+    datasets_to_copy: list = None,
+    batch_size: int = 10000,
 ):
     """Copy selected events from input to output HDF5 file.
     
@@ -198,6 +215,10 @@ def copy_events_to_h5(
         Path to output HDF5 file
     indices : np.ndarray
         Indices of events to copy
+    datasets_to_copy : list, optional
+        List of dataset paths to copy. If None, copies ALL datasets.
+    batch_size : int
+        Number of events to copy at once (for large datasets)
     """
     if len(indices) == 0:
         print(f"No events to write to {output_file}")
@@ -205,27 +226,82 @@ def copy_events_to_h5(
     
     # Sort indices for HDF5 fancy indexing requirement
     indices_sorted = np.sort(indices)
+    n_events = len(indices_sorted)
     
-    def copy_dataset(name, obj):
-        """Helper function to copy datasets recursively."""
-        if isinstance(obj, h5py.Dataset):
-            # Copy dataset with selected indices
-            data = obj[indices_sorted]
-            f_out.create_dataset(name, data=data, compression=obj.compression)
-            # Copy attributes
-            for attr_name, attr_value in obj.attrs.items():
-                f_out[name].attrs[attr_name] = attr_value
+    print(f"  Copying {n_events} events to {output_file}...")
     
     with h5py.File(input_file, "r") as f_in:
         with h5py.File(output_file, "w") as f_out:
-            # Recursively visit all datasets
-            f_in.visititems(copy_dataset)
+            # If no specific datasets specified, get all datasets
+            if datasets_to_copy is None:
+                datasets_to_copy = []
+                def collect_datasets(name, obj):
+                    if isinstance(obj, h5py.Dataset):
+                        datasets_to_copy.append(name)
+                f_in.visititems(collect_datasets)
+            
+            print(f"    Found {len(datasets_to_copy)} datasets to copy")
+            
+            # Copy datasets with progress indicator
+            for i, dataset_path in enumerate(datasets_to_copy):
+                if dataset_path in f_in:
+                    dataset = f_in[dataset_path]
+                    
+                    # Create parent groups if they don't exist
+                    if '/' in dataset_path:
+                        parent_path = '/'.join(dataset_path.split('/')[:-1])
+                        if parent_path and parent_path not in f_out:
+                            f_out.create_group(parent_path)
+                    
+                    # For large datasets, copy in batches
+                    if n_events > batch_size and dataset.nbytes > 100 * 1024 * 1024:  # > 100 MB
+                        print(f"    [{i+1}/{len(datasets_to_copy)}] {dataset_path} (batched, {dataset.nbytes / 1024**2:.1f} MB)")
+                        
+                        # Read first batch to get shape
+                        first_batch = dataset[indices_sorted[:min(batch_size, n_events)]]
+                        output_shape = (n_events,) + first_batch.shape[1:]
+                        
+                        # Create output dataset
+                        out_dset = f_out.create_dataset(
+                            dataset_path,
+                            shape=output_shape,
+                            dtype=first_batch.dtype,
+                            compression='gzip',
+                            compression_opts=1,  # Lower compression for speed
+                            chunks=True
+                        )
+                        
+                        # Write first batch
+                        out_dset[:len(first_batch)] = first_batch
+                        
+                        # Process remaining batches
+                        for batch_start in range(batch_size, n_events, batch_size):
+                            batch_end = min(batch_start + batch_size, n_events)
+                            batch_indices = indices_sorted[batch_start:batch_end]
+                            batch_data = dataset[batch_indices]
+                            out_dset[batch_start:batch_end] = batch_data
+                            if batch_start % (batch_size * 5) == 0:
+                                print(f"      Progress: {batch_end}/{n_events} events")
+                    else:
+                        # Small dataset or few events - copy all at once
+                        data = dataset[indices_sorted]
+                        f_out.create_dataset(
+                            dataset_path, 
+                            data=data, 
+                            compression='gzip',
+                            compression_opts=1  # Lower compression for speed
+                        )
+                        print(f"    [{i+1}/{len(datasets_to_copy)}] {dataset_path}")
+                    
+                    # Copy attributes
+                    for attr_name, attr_value in dataset.attrs.items():
+                        f_out[dataset_path].attrs[attr_name] = attr_value
             
             # Copy top-level attributes
             for key in f_in.attrs.keys():
                 f_out.attrs[key] = f_in.attrs[key]
     
-    print(f"Wrote {len(indices)} events to {output_file}")
+    print(f"  ✓ Completed {output_file}")
 
 
 def main():
@@ -233,8 +309,9 @@ def main():
         description="Split LHCO dijet data into SR and SB categories"
     )
     parser.add_argument(
-        "input_file",
+        "--input_file",
         type=str,
+        default="/.automount/net_rw/net__data_ttk/soshaw/bg_N100.h5",
         help="Input HDF5 file with dijet data"
     )
     parser.add_argument(
@@ -275,6 +352,23 @@ def main():
         default=42,
         help="Random seed for sampling"
     )
+    parser.add_argument(
+        "--sr-fraction-std",
+        type=float,
+        default=0.01,
+        help="Standard deviation for SR/SB split variation (default 0.01 = 1%%)"
+    )
+    parser.add_argument(
+        "--jet-level-only",
+        action="store_true",
+        help="Copy only jet-level data (jet_features, signal, jet_coords) for speed. "
+             "By default, copies ALL datasets including constituent-level data."
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force overwrite existing output files. By default, skips existing files."
+    )
     
     args = parser.parse_args()
     
@@ -313,7 +407,8 @@ def main():
         categories,
         n_background_total=args.n_background,
         n_signal_total=args.n_signal,
-        random_seed=args.seed
+        random_seed=args.seed,
+        sr_fraction_std=args.sr_fraction_std
     )
     
     # Convert local indices back to original file indices
@@ -324,18 +419,35 @@ def main():
     
     # Save to separate files
     print("\n[4/4] Writing output files...")
+    
+    # Determine which datasets to copy
+    if args.jet_level_only:
+        print("Copying only jet-level data (fast mode)...")
+        datasets_to_copy = ['jet_features', 'signal', 'jet_coords']
+    else:
+        print("Copying all datasets including constituent-level data...")
+        datasets_to_copy = None  # Will auto-discover all datasets
+    
     output_files = {
         'signal_SR': output_dir / "signal_SR.h5",
-        'background_SR': output_dir / "background_SR.h5",
-        'signal_SB': output_dir / "signal_SB.h5",
+        'background_SR': output_dir / "background_SR_supp.h5",
+        'signal_SB': output_dir / "signal_SB_supp.h5",
         'background_SB': output_dir / "background_SB.h5",
     }
     
     for cat_name, file_path in output_files.items():
+        print(f"\n{cat_name}:")
+        
+        # Skip if file already exists (unless --force is used)
+        if file_path.exists() and not args.force:
+            print(f"  ✓ File already exists: {file_path} (skipping, use --force to overwrite)")
+            continue
+        
         copy_events_to_h5(
             args.input_file,
             str(file_path),
-            sampled_file_indices[cat_name]
+            sampled_file_indices[cat_name],
+            datasets_to_copy=datasets_to_copy
         )
     
     # Print final summary

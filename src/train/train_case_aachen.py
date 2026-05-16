@@ -56,7 +56,7 @@ import wandb
 
 # gabbro imports
 from gabbro.utils.arrays import ak_pad
-from gabbro.data.data_utils import create_lhco_h5_dataloaders
+from gabbro.data.data_utils import create_case_h5_dataloaders, create_lhco_h5_dataloaders
 from gabbro.models.backbone import BackboneClassificationLightning, BackboneDijetClassificationLightning, BackboneAachenClassificationLightning
 from gabbro.data.loading import load_lhco_jets_from_h5, load_multiple_h5_files
 
@@ -474,7 +474,7 @@ def set_backbone_requires_grad(model, requires_grad=True):
 
 def main():
     parser = argparse.ArgumentParser(description="OmniJet-alpha Anomaly Detection Training Script")
-    parser.add_argument("--dataset_path", default=str(os.getenv("DATASET_PATH")), type=str, help="Path to the LHCO dataset")
+    parser.add_argument("--dataset_path", default=str(os.getenv("DATASET_PATH_CASE")), type=str, help="Path to the CASE dataset")
     parser.add_argument("--gpu_id", type=int, default=int(os.getenv("GPU_ID")), help="GPU ID to use for computation")
     parser.add_argument("--seed", type=int, default=int(os.getenv("SEED")), help="Random seed for reproducibility")
     parser.add_argument("--jet_name", type=str, default=str(os.getenv("JET_NAME")), choices=["jet1", "jet2", "both"], help="Name of the jet to use from the dataset")
@@ -530,8 +530,8 @@ def main():
         "part_phirel": {"multiply_by": 3}
     }
 
-    signal_path = os.path.join(args.dataset_path, "sn_25k_SR_train.h5")
-    background_path = os.path.join(args.dataset_path, "bg_200k_SR_train.h5")
+    signal_path = os.path.join(args.dataset_path, "QstarToQW_M_3000_mW_170_TuneCP2_13TeV-pythia8.h5")
+    background_path = os.path.join(args.dataset_path, "background_0.h5")
     
     h5_files_all = [signal_path, background_path]
 
@@ -556,14 +556,13 @@ def main():
         "jet_name": args.jet_name,
     }
     
-    train_loader, val_loader = create_lhco_h5_dataloaders(
+    train_loader, val_loader = create_case_h5_dataloaders(
         h5_files_train=h5_files_all,
         h5_files_val=None,
         feature_dict=input_features_dict,
         batch_size=args.batch_size,
         n_jets_train=args.n_jets_train,  # [signal, background]
         max_sequence_len=128,
-        mom4_format="epxpypz",
         jet_name=args.jet_name,
         train_val_split=args.train_val_split,
         shuffle_train=True,

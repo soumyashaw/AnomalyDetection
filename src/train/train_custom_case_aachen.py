@@ -1,27 +1,28 @@
-""" Python file to train the OmniJet-alpha model with continuous tokens - Aachen supervised variant.
+""" Python file to train the OmniJet-alpha model with continuous tokens - Aachen anomaly detection variant for CASE dataset.
 
 PROJECT STRUCTURE:
 AnomalyDetection/
 ├── src/
-│   ├── train/              # Training scripts (e.g., train_aachen.py)
+│   ├── train/              # Training scripts (e.g., train_case_aachen.py, train_custom_case_aachen.py)
 │   ├── eval/               # Evaluation scripts (evaluate.py, evaluate_true_roc.py, etc.)
 │   ├── data/               # Data processing (split_h5_dataset.py)
-│   ├── viz/                # Visualization (unsupervised_learning.py, visualize_clustering.py)
+│   ├── viz/                # Visualization (plot_case_dijet_mass.py, etc.)
 │   └── poc_expts/          # Proof-of-concept experiments
 ├── scripts/                # Job launchers (.sh and .sub files)
 ├── gabbro/                 # Core library (models, data utilities, metrics)
 └── [output directories: plots/, results/, logs/, checkpoints/, dijet_expts/, aachen_head_expts/]
 
 COMPONENTS USED:
-├── Data Loading & Preprocessing
-│   ├── load_multiple_h5_files
-│   ├── create_lhco_h5_dataloaders
-│   └── ak_pad
+├── Data Loading
+│   ├── load_multiple_case_h5_files
+│   ├── ak_select_and_preprocess
+│   ├── ak_pad
+│   └── JetDataset
 │
 ├── Model Architecture
-│   ├── BackboneAachenClassificationLightning (two-jet model)
-│   │   ├── BackboneTransformer blocks
-│   │   └── AachenClassificationHead
+│   ├── BackboneAachenClassificationLightning
+│   │   ├── BackboneTransformer (use_continuous_input=True)
+│   │   └── AachenClassificationHead (class_head_type="aachen")
 │   │
 │   └── Loss: CrossEntropyLoss with class weighting
 │
@@ -29,10 +30,28 @@ COMPONENTS USED:
     ├── PyTorch Lightning Trainer
     ├── AdamW + ConstantLR Scheduler
     ├── AUC & ARGOS metric callbacks
-    └── Weights & Biases logging
+    └── Weights & Biases logging (optional)
 
-USAGE: python -m src.train.train_aachen [args] or ./scripts/train_aachen.sh
-Training an Aachen-style two-jet anomaly detection model. (Trained on 200k bkg + 25k signal jets per jet) (Tested on 200k bkg + 50k signal jets)
+USAGE:
+Run from project root with:
+  python -m src.train.train_custom_case_aachen [args]
+
+Or via shell launcher:
+  ./scripts/train_custom_case_aachen.sh
+
+DESCRIPTION:
+Trains a weakly supervised anomaly detection model on CASE datasets.
+- Training: Clean background + Polluted background (labeled as signal) + Signal jets
+- Testing: Clean background + Signal jets
+- Merge strategies: concat, average, weighted_sum, attention
+- Aachen head: Two-jet model for anomaly detection
+
+WEAK SUPERVISION SETUP:
+- Clean background: labeled as 0 (background)
+- Signal: labeled as 1 (signal)
+- Polluted background (from signal region): labeled as 1 (signal) - THIS IS THE WEAK SUPERVISION
+  The model learns to distinguish clean background from "signal region" events, which includes
+  both true signal and polluted background.
 """
 # imports
 import os
@@ -42,6 +61,7 @@ import argparse
 import numpy as np
 import awkward as ak
 import lightning as L
+from collections.abc import Mapping
 from functools import partial
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, TensorDataset
@@ -51,16 +71,98 @@ from lightning.pytorch.loggers import WandbLogger
 from dotenv import load_dotenv
 from datetime import datetime
 from pathlib import Path
-import matplotlib.pyplot as plt
 import wandb
 
 # gabbro imports
 from gabbro.utils.arrays import ak_pad
-from gabbro.data.data_utils import create_lhco_h5_dataloaders
+from gabbro.data.data_utils import create_case_h5_dataloaders, create_custom_case_h5_dataloaders
 from gabbro.models.backbone import BackboneClassificationLightning, BackboneDijetClassificationLightning, BackboneAachenClassificationLightning
-from gabbro.data.loading import load_lhco_jets_from_h5, load_multiple_h5_files
+from gabbro.models.backbone_base import BackboneTransformer
+from gabbro.data.loading import load_case_jets_from_h5, load_multiple_case_h5_files
 
 load_dotenv()  # Load environment variables from .env file (for W&B API key, etc.)
+
+
+def _to_plain_dict(obj):
+    """Convert config-like containers (e.g., DictConfig) to plain dict recursively."""
+    if isinstance(obj, Mapping):
+        return {k: _to_plain_dict(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_to_plain_dict(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_to_plain_dict(v) for v in obj)
+    return obj
+
+
+class AttrDict(dict):
+    """Dict with attribute-style access (obj.key) while keeping dict behavior."""
+
+    def __getattr__(self, key):
+        try:
+            return self[key]
+        except KeyError as exc:
+            raise AttributeError(key) from exc
+
+    def __setattr__(self, key, value):
+        self[key] = value
+
+    def __delattr__(self, key):
+        try:
+            del self[key]
+        except KeyError as exc:
+            raise AttributeError(key) from exc
+
+
+def _to_attrdict(obj):
+    """Recursively convert mappings to AttrDict for cfg objects like embed_cfg."""
+    if isinstance(obj, Mapping):
+        return AttrDict({k: _to_attrdict(v) for k, v in obj.items()})
+    if isinstance(obj, list):
+        return [_to_attrdict(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_to_attrdict(v) for v in obj)
+    return obj
+
+
+def extract_pretrained_backbone_hparams(ckpt_path):
+    """Extract normalized backbone hyperparameters from a checkpoint.
+
+    Returns
+    -------
+    dict
+        Flattened backbone configuration dict, or empty dict if unavailable.
+    """
+    try:
+        ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=True)
+    except TypeError:
+        ckpt = torch.load(ckpt_path, map_location='cpu')
+
+    if not isinstance(ckpt, dict):
+        return {}
+
+    hparams = ckpt.get('hyper_parameters', {})
+    if not hparams:
+        hparams = ckpt.get('hparams', {})
+    if not hparams:
+        hparams = ckpt.get('hparams_dict', {})
+
+    if isinstance(hparams, Mapping):
+        hparams = _to_plain_dict(hparams)
+    else:
+        hparams = {}
+
+    if hparams and 'backbone_cfg' in hparams and 'embedding_dim' not in hparams:
+        if isinstance(hparams['backbone_cfg'], Mapping):
+            hparams = _to_plain_dict(hparams['backbone_cfg'])
+
+    if hparams and 'model_kwargs' in hparams and 'embedding_dim' not in hparams:
+        model_kwargs = hparams.get('model_kwargs', {})
+        if isinstance(model_kwargs, Mapping) and 'backbone_cfg' in model_kwargs:
+            hparams = _to_plain_dict(model_kwargs['backbone_cfg'])
+        elif isinstance(model_kwargs, Mapping) and 'embedding_dim' in model_kwargs:
+            hparams = _to_plain_dict(model_kwargs)
+
+    return hparams if isinstance(hparams, dict) else {}
 
 class ExperimentLogger:
     """Handles logging of experiment configuration and results."""
@@ -169,7 +271,7 @@ def create_model_config(pp_dict, args):
             "intermediate_dim": None,
         }),
         
-        # Transformer configuration
+        # Transformer configuration (matching pre-trained checkpoint)
         "transformer_cfg": OmegaConf.create({
             "dim": args.embedding_dim,  # Must match embedding_dim
             "n_blocks": 8,
@@ -192,7 +294,7 @@ def create_model_config(pp_dict, args):
             },
         }),
         
-        # # Classification head settings (for class_attention type omnijet alpha)
+        # # Classification head settings (for class_attention type)
         # "class_head_hidden_dim": 128,
         # "class_head_num_heads": 8,
         # "class_head_num_CA_blocks": 2,
@@ -322,7 +424,7 @@ class ARGOSCallback(Callback):
                 labels = batch["jet_type_labels"].to(device)
                 
                 # Check if model is dijet or single-jet
-                if isinstance(pl_module, BackboneDijetClassificationLightning):
+                if isinstance(pl_module, BackboneAachenClassificationLightning):
                     X1 = batch["part_features"].to(device)
                     X2 = batch["part_features_jet2"].to(device)
                     mask1 = batch["part_mask"].to(device)
@@ -332,8 +434,14 @@ class ARGOSCallback(Callback):
                     X = batch["part_features"].to(device)
                     mask = batch["part_mask"].to(device)
                     logits = pl_module(X, mask)
-                
-                probs = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
+
+                # Handle different logit shapes
+                if logits.dim() == 1:
+                    # Binary classification with single logit (BCEWithLogitsLoss)
+                    probs = torch.sigmoid(logits).cpu().numpy()
+                else:
+                    # Multi-class with softmax
+                    probs = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
                 all_preds.append(probs)
                 all_labels.append(labels.cpu().numpy())
 
@@ -377,58 +485,139 @@ def load_pretrained_backbone(model, ckpt_path, strict=False):
     Returns
     -------
     dict
-        Dictionary with 'missing_keys' and 'unexpected_keys' from the load operation
+        Dictionary with loading diagnostics
     """
     print(f"Loading pre-trained backbone weights from: {ckpt_path}")
     
-    # Load checkpoint
-    ckpt = torch.load(ckpt_path, map_location='cpu')
+    # Load checkpoint. Prefer weights_only for safer deserialization when available.
+    try:
+        ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=True)
+    except TypeError:
+        ckpt = torch.load(ckpt_path, map_location='cpu')
     
     # Extract state_dict from checkpoint
     if isinstance(ckpt, dict) and 'state_dict' in ckpt:
-        # Lightning checkpoint format
         state_dict = ckpt['state_dict']
     else:
-        # Raw state_dict or direct model state
         state_dict = ckpt
+
+    # Recover checkpoint backbone hyperparameters (same approach as eval_backbone.py).
+    hparams = extract_pretrained_backbone_hparams(ckpt_path)
     
     # Extract backbone state_dict and remove 'backbone.' prefix if present
     backbone_state_dict = {}
     for key, value in state_dict.items():
         if key.startswith('backbone.'):
-            # Remove 'backbone.' prefix from Lightning checkpoint
             new_key = key[len('backbone.'):]
             backbone_state_dict[new_key] = value
         elif not any(key.startswith(prefix) for prefix in ['class_head', 'head', 'embedding_projection', 
                                                              'encoder_layer', 'cross_attn', 'fusion_proj']):
-            # Include keys that don't belong to the classification head
             backbone_state_dict[key] = value
     
     if not backbone_state_dict:
-        # If no backbone-specific keys found, try using all keys (for pure backbone checkpoints)
         backbone_state_dict = state_dict
         print("Warning: No 'backbone.' prefix found. Using all keys from checkpoint.")
+
+    # Eval-style path: instantiate BackboneTransformer from checkpoint hparams,
+    # load checkpoint weights there, then swap it into the Lightning model.
+    if hparams and 'embedding_dim' in hparams:
+        try:
+            print("Instantiating BackboneTransformer with checkpoint hyperparameters...")
+            hparams_for_model = _to_attrdict(hparams)
+            ckpt_backbone = BackboneTransformer(**hparams_for_model)
+            ckpt_backbone.load_state_dict(backbone_state_dict, strict=strict)
+
+            # Ensure replaced backbone is compatible with training dataloader's jet feature shape.
+            current_jet_dim = getattr(model.backbone, "jet_features_input_dim", None)
+            ckpt_jet_dim = getattr(ckpt_backbone, "jet_features_input_dim", None)
+            if (
+                current_jet_dim is not None
+                and ckpt_jet_dim is not None
+                and current_jet_dim != ckpt_jet_dim
+            ):
+                print(
+                    f"Warning: Checkpoint backbone jet_features_input_dim ({ckpt_jet_dim}) "
+                    f"differs from current model ({current_jet_dim}). "
+                    "Skipping full backbone replacement and falling back to partial in-place loading."
+                )
+                raise ValueError(
+                    f"Incompatible jet feature dims: checkpoint={ckpt_jet_dim}, current={current_jet_dim}"
+                )
+
+            model.backbone = ckpt_backbone
+            print("Successfully replaced model.backbone with checkpoint-configured backbone.")
+            return {
+                "mode": "replaced_backbone_from_hparams",
+                "missing_keys": [],
+                "unexpected_keys": [],
+                "skipped_missing_key": [],
+                "skipped_shape_mismatch": [],
+            }
+        except Exception as e:
+            print(
+                f"Warning: Could not rebuild backbone from checkpoint hyperparameters "
+                f"({type(e).__name__}: {e}). Falling back to partial in-place loading into current backbone."
+            )
     
-    # Load state_dict into model.backbone
-    result = model.backbone.load_state_dict(backbone_state_dict, strict=strict)
+    # Filter keys that do not exist in current backbone or have incompatible tensor shapes.
+    current_backbone_state = model.backbone.state_dict()
+    filtered_backbone_state = {}
+    skipped_missing_key = []
+    skipped_shape_mismatch = []
+
+    for key, value in backbone_state_dict.items():
+        if key not in current_backbone_state:
+            skipped_missing_key.append(key)
+            continue
+
+        if current_backbone_state[key].shape != value.shape:
+            skipped_shape_mismatch.append(
+                (key, tuple(value.shape), tuple(current_backbone_state[key].shape))
+            )
+            continue
+
+        filtered_backbone_state[key] = value
+
+    if skipped_missing_key:
+        print(
+            f"Warning: Skipping {len(skipped_missing_key)} pretrained backbone keys not present in current model."
+        )
+
+    if skipped_shape_mismatch:
+        print(
+            f"Warning: Skipping {len(skipped_shape_mismatch)} pretrained backbone keys due to shape mismatch."
+        )
+        for key, ckpt_shape, model_shape in skipped_shape_mismatch:
+            print(f"  Shape mismatch for '{key}': checkpoint {ckpt_shape} vs model {model_shape}")
+
+    # Keep strict only if explicitly requested and no incompatible keys were skipped.
+    effective_strict = strict and not skipped_missing_key and not skipped_shape_mismatch
+
+    # Load compatible subset into model.backbone
+    result = model.backbone.load_state_dict(filtered_backbone_state, strict=effective_strict)
     missing_keys = result[0] if isinstance(result, tuple) else []
     unexpected_keys = result[1] if isinstance(result, tuple) else []
     
     if missing_keys:
         msg = f"Missing keys in backbone checkpoint: {missing_keys}"
-        if strict:
-            logger.error(msg)
+        if effective_strict:
             raise RuntimeError(msg)
         else:
-            logger.warning(msg)
+            print(f"Warning: {msg}")
     
     if unexpected_keys:
         msg = f"Unexpected keys in backbone checkpoint: {unexpected_keys}"
-        logger.warning(msg)
+        print(f"Warning: {msg}")
     
     print(f"Successfully loaded backbone weights from: {ckpt_path}")
     
-    return {"missing_keys": missing_keys, "unexpected_keys": unexpected_keys}
+    return {
+        "mode": "partial_inplace_load",
+        "missing_keys": missing_keys,
+        "unexpected_keys": unexpected_keys,
+        "skipped_missing_key": skipped_missing_key,
+        "skipped_shape_mismatch": skipped_shape_mismatch,
+    }
 
 
 def load_backbone_weights(model, ckpt_path, strict=False):
@@ -446,7 +635,7 @@ def load_backbone_weights(model, ckpt_path, strict=False):
         Whether to strictly enforce that the keys match (default: False)
     """
     if ckpt_path is None or ckpt_path == "None":
-        logger.info("No pre-trained backbone weights specified.")
+        print("No pre-trained backbone weights specified.")
         return
     
     load_pretrained_backbone(model, ckpt_path, strict=strict)
@@ -472,9 +661,10 @@ def set_backbone_requires_grad(model, requires_grad=True):
     return num_params
 
 
+
 def main():
-    parser = argparse.ArgumentParser(description="OmniJet-alpha Anomaly Detection Training Script")
-    parser.add_argument("--dataset_path", default=str(os.getenv("DATASET_PATH")), type=str, help="Path to the LHCO dataset")
+    parser = argparse.ArgumentParser(description="OmniJet-alpha Anomaly Detection Training Script - CASE Dataset Weak Supervision")
+    parser.add_argument("--dataset_path", default=str(os.getenv("DATASET_PATH_CASE")), type=str, help="Path to the CASE dataset")
     parser.add_argument("--gpu_id", type=int, default=int(os.getenv("GPU_ID")), help="GPU ID to use for computation")
     parser.add_argument("--seed", type=int, default=int(os.getenv("SEED")), help="Random seed for reproducibility")
     parser.add_argument("--jet_name", type=str, default=str(os.getenv("JET_NAME")), choices=["jet1", "jet2", "both"], help="Name of the jet to use from the dataset")
@@ -483,12 +673,12 @@ def main():
     parser.add_argument("--max_steps", type=int, default=int(os.getenv("MAX_STEPS")), help="Maximum number of training steps")
     parser.add_argument("--learning_rate", type=float, default=float(os.getenv("LEARNING_RATE")), help="Learning rate")
     parser.add_argument("--train_val_split", type=float, default=float(os.getenv("TRAIN_VAL_SPLIT")), help="Train/validation split ratio")
-    parser.add_argument("--n_jets_train", type=list, default=list(map(int,os.getenv("N_JETS_TRAIN").strip('[]').split(','))), help="Number of jets per class for training [signal, background]")
+    parser.add_argument("--n_jets_train", type=list, default=list(map(int,os.getenv("N_JETS_TRAIN_CASE_AACHEN").strip('[]').split(','))), help="Number of jets per class for training [signal, polluted_background, clean_background]")
     parser.add_argument("--embedding_dim", type=int, default=int(os.getenv("EMBEDDING_DIM")), help="Embedding dimension")
     parser.add_argument("--naming_identifier", type=str, default="", help="Optional identifier to add to the run name for easier tracking")
+    parser.add_argument("--log_dir", type=str, default=str(os.getenv("LOG_DIR_AACHEN")), help="Directory for experiment logs")
     parser.add_argument("--pretrained_ckpt", type=str, help="Path to pre-trained checkpoint")
     parser.add_argument("--load_pretrained", action="store_true", help="Load pre-trained backbone weights from checkpoint")
-    parser.add_argument("--log_dir", type=str, default=str(os.getenv("LOG_DIR_AACHEN")), help="Directory for experiment logs")
     parser.add_argument("--use_class_weights", type=lambda x: x.lower() == 'true', default=True, help="Use automatic class weighting for imbalanced data (default: True)")
     parser.add_argument("--freeze_backbone", action="store_true", help="Freeze backbone weights during training (no gradient updates)")
     parser.add_argument("--update_backbone", action="store_true", default=True, help="Update backbone weights during training (default: True, set to False with --freeze_backbone)")
@@ -530,40 +720,38 @@ def main():
         "part_phirel": {"multiply_by": 3}
     }
 
-    signal_path = os.path.join(args.dataset_path, "sn_25k_SR_train.h5")
-    background_path = os.path.join(args.dataset_path, "bg_200k_SR_train.h5")
+    # CASE dataset files
+    signal_path = os.path.join(args.dataset_path, "QstarToQW_M_3000_mW_170_TuneCP2_13TeV-pythia8.h5")
+    supp_background_path = os.path.join(args.dataset_path, "background_1.h5")
+    background_path = os.path.join(args.dataset_path, "background_0.h5")
     
-    h5_files_all = [signal_path, background_path]
-
+    h5_files_all = [signal_path, supp_background_path, background_path]
     print("n_jets_train:", args.n_jets_train)
     print("Using Jet:", args.jet_name)
-    print("Merge strategy:", args.merge_strategy)
-
 
     # Log data configuration
     data_config = {
         "dataset_path": args.dataset_path,
         "signal_file": signal_path,
+        "polluted_background_file": supp_background_path,
         "background_file": background_path,
         "n_jets_train": args.n_jets_train,
         "batch_size": args.batch_size,
         "max_sequence_len": 128,
-        "mom4_format": "epxpypz",
         "train_val_split": args.train_val_split,
         "features": list(input_features_dict.keys()),
         "feature_preprocessing": input_features_dict,
         "shuffle_train": True,
         "jet_name": args.jet_name,
     }
-    
-    train_loader, val_loader = create_lhco_h5_dataloaders(
+
+    train_loader, val_loader = create_custom_case_h5_dataloaders(
         h5_files_train=h5_files_all,
         h5_files_val=None,
         feature_dict=input_features_dict,
         batch_size=args.batch_size,
-        n_jets_train=args.n_jets_train,  # [signal, background]
+        n_jets_train=args.n_jets_train,  # [signal, polluted background, background]
         max_sequence_len=128,
-        mom4_format="epxpypz",
         jet_name=args.jet_name,
         train_val_split=args.train_val_split,
         shuffle_train=True,
@@ -574,27 +762,69 @@ def main():
     # 3. Create Model
     # ============================================================
 
-    # Calculate class weights for imbalanced dataset
+    # Build model config:
+    # - default: from current args
+    # - with pretrained checkpoint: keep backbone config from checkpoint hparams
     model_kwargs = create_model_config(input_features_dict, args)
+    model_config_source = "args"
+    pretrained_backbone_hparams = {}
+    if args.load_pretrained and args.pretrained_ckpt:
+        pretrained_backbone_hparams = extract_pretrained_backbone_hparams(args.pretrained_ckpt)
+        if pretrained_backbone_hparams and "embedding_dim" in pretrained_backbone_hparams:
+            backbone_override_keys = [
+                "particle_features_dict",
+                "embedding_dim",
+                "max_sequence_len",
+                "n_out_nodes",
+                "embed_cfg",
+                "transformer_cfg",
+                "jet_features_input_dim",
+                "apply_causal_mask",
+                "zero_padded_start_particle",
+            ]
+            overridden = []
+            for key in backbone_override_keys:
+                if key in pretrained_backbone_hparams:
+                    model_kwargs[key] = pretrained_backbone_hparams[key]
+                    overridden.append(key)
+
+            model_config_source = "pretrained_checkpoint_hparams"
+            print("Using backbone configuration from pretrained checkpoint.")
+            print(f"Overridden backbone keys: {overridden}")
+        else:
+            print(
+                "Warning: Could not extract usable backbone hyperparameters from checkpoint. "
+                "Falling back to args-based model config."
+            )
+
+    # BackboneTransformer expects cfg objects with attribute-style access (cfg.type, etc.).
+    for cfg_key in ["embed_cfg", "transformer_cfg"]:
+        if cfg_key in model_kwargs and isinstance(model_kwargs[cfg_key], Mapping):
+            model_kwargs[cfg_key] = _to_attrdict(model_kwargs[cfg_key])
     
     if args.use_class_weights:
-        # n_jets_train = [signal, background] = [25000, 200000]
-        n_signal = args.n_jets_train[0]
-        n_background = args.n_jets_train[1]
-        total = n_signal + n_background
+        # For weak supervision: Calculate weights based on ACTUAL label distribution
+        # n_jets_train = [signal_real, supp_bg_labeled_as_signal, background_real]
+        # Actual label distribution after loading:
+        #   - Label 1: signal_real + supp_bg_labeled_as_signal  
+        #   - Label 0: background_real
+        n_label_1 = args.n_jets_train[0] + args.n_jets_train[1]  # signal + supp background
+        n_label_0 = args.n_jets_train[2]  # clean background
+        total = n_label_1 + n_label_0
         
         # Weight = total / (n_classes * n_samples_per_class)
-        # Higher weight for minority class (signal)
-        # Note: In LHCO files, signal=1, background=0
-        weight_background = total / (2.0 * n_background)  # Weight for class 0
-        weight_signal = total / (2.0 * n_signal)  # Weight for class 1
+        # Higher weight for minority class
+        weight_label_0 = total / (2.0 * n_label_0)  # Weight for class 0 (clean background)
+        weight_label_1 = total / (2.0 * n_label_1)  # Weight for class 1 (signal + polluted)
         # PyTorch CrossEntropyLoss expects weights in class order: [weight_for_class_0, weight_for_class_1]
-        class_weights = [weight_background, weight_signal]
+        class_weights = [weight_label_0, weight_label_1]  # CORRECT ORDER!
         
-        print(f"\n=== Supervised Training Label Distribution ===")
-        print(f"Class 0 (Background): {n_background} jets → weight={weight_background:.4f}")
-        print(f"Class 1 (Signal): {n_signal} jets → weight={weight_signal:.4f}")
-        print(f"Weight ratio (Signal/Background): {weight_signal/weight_background:.4f}")
+        print(f"\n=== Weak Supervision Label Distribution ===")
+        print(f"Label 0 (clean background): {n_label_0} jets → weight={weight_label_0:.4f}")
+        print(f"Label 1 (signal + polluted bg): {n_label_1} jets → weight={weight_label_1:.4f}")
+        print(f"  - True signal: {args.n_jets_train[0]}")
+        print(f"  - Polluted background: {args.n_jets_train[1]}")
+        print(f"Weight ratio (Label_1/Label_0): {weight_label_1/weight_label_0:.4f}")
         print(f"Class weights array: {class_weights}\n")
         model_kwargs["class_weights"] = class_weights
     else:
@@ -615,7 +845,7 @@ def main():
     # ---------------------- Single Jet Data Model ----------------------------
     # -------------------------------------------------------------------------
 
-    # Initialize the Backbone + Classification Head (Single Jet)
+    # Initialize the Backbone + Classification Head
     # model = BackboneClassificationLightning(
     #     optimizer=torch.optim.AdamW,
     #     optimizer_kwargs={
@@ -668,7 +898,7 @@ def main():
             "weight_decay": 1e-2,
         },
         scheduler=scheduler_with_params,
-        merge_strategy=args.merge_strategy,  # other options: "average", "weighted_sum", "attention"
+        merge_strategy=args.merge_strategy,  # options: "concat", "average", "weighted_sum", "attention"
         model_kwargs=model_kwargs,
         use_continuous_input=True,
         scheduler_lightning_kwargs={
@@ -679,10 +909,11 @@ def main():
         },
     )
 
+    
     # Load pre-trained backbone weights if requested
     if args.load_pretrained and args.pretrained_ckpt:
         print(f"Loading pre-trained backbone weights from: {args.pretrained_ckpt}")
-        load_pretrained_backbone(model, args.pretrained_ckpt)
+        load_pretrained_backbone(model, args.pretrained_ckpt, strict=False)
         print("Successfully loaded pre-trained backbone weights!")
     
     # Freeze or update backbone based on arguments
@@ -699,18 +930,19 @@ def main():
     # Log model configuration
     model_config = {
         "architecture": "BackboneAachenClassificationLightning",
+        "class_head_type": "aachen", #"class_attention",
         "merge_strategy": args.merge_strategy,
-        "class_head_type": "aachen_attention",
+        "config_source": model_config_source,
         "use_continuous_input": True,
         "num_parameters": num_params,
-        "embedding_dim": args.embedding_dim,
-        "n_transformer_blocks": 2,
+        "embedding_dim": model_kwargs.get("embedding_dim"),
+        "n_transformer_blocks": 8,  # Updated to match pre-trained model
         "num_attention_heads": 8,
-        "max_sequence_len": 128,
+        "max_sequence_len": model_kwargs.get("max_sequence_len"),
+        "jet_features_input_dim": model_kwargs.get("jet_features_input_dim"),
         "n_output_classes": 2,
-        "freeze_backbone": args.freeze_backbone,
-        "load_pretrained_checkpoint": args.load_pretrained and args.pretrained_ckpt,
-        "pretrained_checkpoint_path": args.pretrained_ckpt if (args.load_pretrained and args.pretrained_ckpt) else None,
+        "pretrained_checkpoint": args.pretrained_ckpt if args.load_pretrained else None,
+        "load_pretrained": args.load_pretrained,
         "model_kwargs": {k: v for k, v in model_kwargs.items() if k != "particle_features_dict"},
     }
     
@@ -729,6 +961,8 @@ def main():
         "early_stopping_monitor": "val_argos",
         "checkpoint_monitor": "val_argos",
         "checkpoint_mode": "max",
+        "load_pretrained": args.load_pretrained,
+        "pretrained_ckpt": args.pretrained_ckpt,
         "use_class_weights": args.use_class_weights,
         "class_weights": model_kwargs.get("class_weights", None),
     }
@@ -752,14 +986,14 @@ def main():
     print(f"Configuration saved to: {exp_logger.run_dir / 'config.json'}")
     
     # Setup callbacks
-    # checkpoint_callback = ModelCheckpoint(
-    #     dirpath=exp_logger.get_checkpoint_dir(),
-    #     filename="{epoch:02d}_{val_loss:.4f}",
-    #     monitor="val_loss",
-    #     mode="min",
-    #     save_top_k=1,
-    #     save_last=False,
-    # )
+    checkpoint_loss_callback = ModelCheckpoint(
+        dirpath=exp_logger.get_checkpoint_dir(),
+        filename="{epoch:02d}_{val_loss:.4f}",
+        monitor="val_loss",
+        mode="min",
+        save_top_k=1,
+        save_last=False,
+    )
 
     # Alternatively, monitor AUC instead of loss
     # checkpoint_callback = ModelCheckpoint(
@@ -772,7 +1006,7 @@ def main():
     # )
 
     # Or using ARGOS metric
-    checkpoint_callback = ModelCheckpoint(
+    checkpoint_argos_callback = ModelCheckpoint(
         dirpath=exp_logger.get_checkpoint_dir(),
         filename="{epoch:02d}_{val_argos:.4f}",
         monitor="val_argos",
@@ -781,12 +1015,12 @@ def main():
         save_last=False,
     )
     
-    # Early stopping enabled
-    early_stop_callback = EarlyStopping(
-        monitor="val_argos",
-        patience=30,
-        mode="max",
-    )
+    # Early stopping disabled
+    # early_stop_callback = EarlyStopping(
+    #     monitor="val_argos",
+    #     patience=75,
+    #     mode="max",
+    # )
 
     # AUC callback: computes ROC AUC on validation set each epoch and logs it
     auc_callback = AUCCallback()
@@ -794,12 +1028,9 @@ def main():
     # ARGOS callback: computes ARGOS metric on validation set each epoch and logs it
     argos_callback = ARGOSCallback()
 
-    # Setup loggers
+    # Setup W&B logger
     loggers = []
-    
-    # W&B logger
     if args.use_wandb:
-        # Use custom run name if provided, otherwise use ExperimentLogger's run name
         wandb_run_name = args.wandb_run_name if args.wandb_run_name else exp_logger.run_name
         
         wandb_logger = WandbLogger(
@@ -808,7 +1039,7 @@ def main():
             name=wandb_run_name,
             save_dir=str(exp_logger.run_dir),
             config=full_config,
-            log_model=True,  # Log model checkpoints to W&B
+            log_model=True,
         )
         loggers.append(wandb_logger)
         
@@ -826,19 +1057,20 @@ def main():
 
     # Create trainer
     print("Starting training...")
+    # Ensure Lightning uses the GPU requested via --gpu_id.
+    # Use explicit accelerator and devices so PL selects the correct device
+    # (accelerator="auto", devices=1 will pick the first visible GPU i.e. GPU 0).
     trainer = L.Trainer(
         max_steps=args.max_steps,
-        accelerator="auto",
-        devices=1,
-        logger=loggers,
-        callbacks=[checkpoint_callback, auc_callback, argos_callback, early_stop_callback],
+        accelerator="gpu",
+        devices=[args.gpu_id],
+        logger=loggers if loggers else False,
+        callbacks=[checkpoint_loss_callback, checkpoint_argos_callback, auc_callback, argos_callback],
         log_every_n_steps=20,
-        val_check_interval=0.1,  # Validate every 10% of training data
-        gradient_clip_val=1.0,
+        gradient_clip_val=1,
         precision="32",
-        enable_progress_bar=not args.use_hpc,
         num_nodes=1,
-        enable_model_summary=True,
+        enable_progress_bar=not args.use_hpc,
     )
 
     # ============================================================
@@ -851,19 +1083,14 @@ def main():
             val_dataloaders=val_loader,
         )
         
-        # Save final metrics and plots
-        exp_logger.save_metrics()
-        exp_logger.plot_training_curves()
-        
         # Log final results
-        exp_logger.log_final_results(trainer, checkpoint_callback)
+        exp_logger.log_final_results(trainer, checkpoint_argos_callback)
         
         print("\n" + "=" * 80)
         print("Training complete!")
-        print(f"Best checkpoint: {checkpoint_callback.best_model_path}")
-        print(f"Best validation loss: {checkpoint_callback.best_model_score:.4f}")
+        print(f"Best checkpoint: {checkpoint_argos_callback.best_model_path}")
+        print(f"Best validation ARGOS: {checkpoint_argos_callback.best_model_score:.4f}")
         print(f"Results saved to: {exp_logger.run_dir}")
-        print(f"Training curves: {exp_logger.run_dir / 'plots' / 'training_curves.png'}")
         if args.use_wandb:
             print(f"W&B run: {wandb.run.url}")
             wandb.finish()
@@ -875,14 +1102,6 @@ def main():
         print(f"Partial results saved to: {exp_logger.run_dir}")
         print("=" * 80 + "\n")
         
-        # Still try to save what we have
-        try:
-            exp_logger.save_metrics()
-            exp_logger.plot_training_curves()
-        except:
-            pass
-        
-        # Finish W&B run
         if args.use_wandb:
             wandb.finish()
         
@@ -900,12 +1119,10 @@ def main():
         print(f"Error: {e}")
         print("=" * 80 + "\n")
         
-        # Finish W&B run with error
         if args.use_wandb:
             wandb.finish(exit_code=1)
         
         raise
-
 
 if __name__ == "__main__":
     main()

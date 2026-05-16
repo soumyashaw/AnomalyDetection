@@ -1392,6 +1392,12 @@ def load_case_jets_from_h5(
 
     all_particle_features = ak.concatenate(all_particle_features_list)
     all_labels = np.concatenate(labels_list).astype(int)
+    
+    # Handle negative labels (treat as background)
+    if np.any(all_labels < 0):
+        n_negative = np.sum(all_labels < 0)
+        print(f"Warning: Found {n_negative} negative labels in {os.path.basename(h5_filename)}, converting to 0 (background)")
+        all_labels = np.clip(all_labels, 0, None)
 
     preprocessed_features = ak_select_and_preprocess(
         all_particle_features, pp_dict=feature_dict
@@ -1449,6 +1455,20 @@ def load_multiple_case_h5_files(
             all_jet1.append(j1)
             all_jet2.append(j2)
             all_labels.append(labels)
+            
+            # Print label statistics for verification
+            unique_labels, counts = np.unique(labels, return_counts=True)
+            n_background = np.sum(labels == 0)
+            n_signal = np.sum(labels == 1)
+            print(f"\n{'='*80}")
+            print(f"File: {os.path.basename(fname)}")
+            print(f"  Background jets (label=0): {n_background:,}")
+            print(f"  Signal jets (label=1):     {n_signal:,}")
+            print(f"  Total jets loaded:         {len(labels):,}")
+            if len(unique_labels) > 2 or not all(ul in [0, 1] for ul in unique_labels):
+                print(f"  WARNING: Unexpected labels found!")
+                print(f"  Unique labels: {dict(zip(unique_labels, counts))}")
+            print(f"{'='*80}\n")
         return (
             ak.concatenate(all_jet1),
             ak.concatenate(all_jet2),
@@ -1462,6 +1482,20 @@ def load_multiple_case_h5_files(
             )
             all_feats.append(feats)
             all_labels.append(labels)
+            
+            # Print label statistics for verification
+            unique_labels, counts = np.unique(labels, return_counts=True)
+            n_background = np.sum(labels == 0)
+            n_signal = np.sum(labels == 1)
+            print(f"\n{'='*80}")
+            print(f"File: {os.path.basename(fname)}")
+            print(f"  Background jets (label=0): {n_background:,}")
+            print(f"  Signal jets (label=1):     {n_signal:,}")
+            print(f"  Total jets loaded:         {len(labels):,}")
+            if len(unique_labels) > 2 or not all(ul in [0, 1] for ul in unique_labels):
+                print(f"  WARNING: Unexpected labels found!")
+                print(f"  Unique labels: {dict(zip(unique_labels, counts))}")
+            print(f"{'='*80}\n")
         return ak.concatenate(all_feats), np.concatenate(all_labels)
 
 

@@ -1144,6 +1144,328 @@ def create_case_h5_dataloaders(
     )
     return train_loader, val_loader
 
+def create_custom_case_h5_dataloaders(
+    h5_files_train,
+    h5_files_val,
+    feature_dict,
+    batch_size=64,
+    n_jets_train=None,
+    n_jets_val=None,
+    max_sequence_len=128,
+    jet_name="both",
+    train_val_split=None,
+    shuffle_train=True,
+    num_workers=1,
+    **kwargs,
+):
+    """Create PyTorch DataLoaders from LHCO HDF5 files.
+    
+    Parameters
+    ----------
+    h5_files_train : list
+        List of HDF5 file paths for training
+    h5_files_val : list
+        List of HDF5 file paths for validation
+    feature_dict : dict
+        Feature preprocessing dictionary
+    batch_size : int
+        Batch size for dataloaders
+    n_jets_train : int or list of int, optional
+        Number of jets to load for training.
+        If int, total number split across files.
+        If list, number per file (must match len(h5_files_train)).
+        If None, load all jets.
+    n_jets_val : int or list of int, optional
+        Number of jets to load for validation (same behavior as n_jets_train)
+    max_sequence_len : int
+        Maximum sequence length (padding)
+    jet_name : str
+        Jet name in H5 files ("jet1", "jet2", or "both")
+    train_val_split : float, optional
+        If provided (e.g., 0.8), will split the same data into train/val
+        with this fraction for training. Ignores h5_files_val in this case.
+    shuffle_train : bool
+        Whether to shuffle training data
+    num_workers : int
+        Number of workers for data loading
+        
+    Returns
+    -------
+    train_loader : DataLoader
+        Training dataloader
+    val_loader : DataLoader
+        Validation dataloader
+    """
+    if jet_name in ["jet1", "jet2"]:
+        if train_val_split is not None:
+            # Case where the jet is either jet1 or jet2 and data is split into train/val
+            # Load all data and split
+            print(f"Loading data from H5 files and splitting {train_val_split:.1%}/{1-train_val_split:.1%} train/val...")
+
+            all_features = []
+            all_labels = []
+
+            for filename, n_jets in zip(h5_files_train, n_jets_train):
+                features, labels = load_case_jets_from_h5(
+                    h5_filename=filename,
+                    feature_dict=feature_dict,
+                    n_jets=n_jets,
+                    jet_name=jet_name,
+                    **kwargs
+                )
+                # if filename has "supp" in it, change the labels to all 1s (signal)
+                if "supp" in filename:
+                    labels = np.ones_like(labels)
+                all_features.append(features)
+                all_labels.append(labels)
+
+            # Concatenate all files
+            all_features = ak.concatenate(all_features)
+            # Concatenate labels
+            all_labels = np.concatenate(all_labels)
+            
+            # Calculate split index
+            n_total = len(all_features)
+            n_train = int(n_total * train_val_split)
+
+            print(f"Total jets loaded: {n_total}, Training jets: {n_train}, Validation jets: {n_total - n_train}")
+            
+            # Shuffle before splitting
+            indices = np.random.permutation(n_total)
+            train_indices = indices[:n_train]
+            val_indices = indices[n_train:]
+            
+            print(f"Splitting {n_total} jets into {n_train} train / {n_total - n_train} val")
+            
+            # Split the data
+            train_features = all_features[train_indices]
+            val_features = all_features[val_indices]
+            train_labels = all_labels[train_indices]
+            val_labels = all_labels[val_indices]
+
+        else:
+            # Case where jet is either jet1 or jet2 and separate train/val files
+            raise NotImplementedError("Only train_val_split is supported in this custom loader.")
+        
+        # Pad and convert to numpy
+        train_features_padded, train_mask = ak_pad(
+            train_features, maxlen=max_sequence_len, axis=1, fill_value=0.0, return_mask=True
+        )
+        val_features_padded, val_mask = ak_pad(
+            val_features, maxlen=max_sequence_len, axis=1, fill_value=0.0, return_mask=True
+        )
+        
+        # Stack fields into a single array (n_jets, max_sequence_len, n_features)
+        feature_names = list(feature_dict.keys())
+        
+        # Stack training features
+        train_features_stacked = ak.concatenate(
+            [train_features_padded[feat][..., np.newaxis] for feat in feature_names],
+            axis=-1
+        )
+        # Stack validation features
+        val_features_stacked = ak.concatenate(
+            [val_features_padded[feat][..., np.newaxis] for feat in feature_names],
+            axis=-1
+        )
+        
+        # Convert to numpy then to torch tensors
+        train_x = torch.from_numpy(ak.to_numpy(train_features_stacked)).float()
+        train_mask_t = torch.from_numpy(ak.to_numpy(train_mask)).float()
+        # Labels are now just a simple numpy array (0 or 1)
+        train_labels_t = torch.from_numpy(train_labels).long()
+        
+        val_x = torch.from_numpy(ak.to_numpy(val_features_stacked)).float()
+        val_mask_t = torch.from_numpy(ak.to_numpy(val_mask)).float()
+        # Labels are now just a simple numpy array (0 or 1)
+        val_labels_t = torch.from_numpy(val_labels).long()
+        
+        print(f"Training data shape: {train_x.shape}, Labels: {train_labels_t.shape}")
+        print(f"  - Signal: {train_labels_t.sum()}, Background: {(1-train_labels_t).sum()}")
+        print(f"Validation data shape: {val_x.shape}, Labels: {val_labels_t.shape}")
+        print(f"  - Signal: {val_labels_t.sum()}, Background: {(1-val_labels_t).sum()}")
+    
+    elif jet_name == "both":
+        if train_val_split is not None:
+            # Case where both jets are loaded and data is split into train/val
+            # Load all data and split
+            print(f"Loading data from H5 files and splitting {train_val_split:.1%}/{1-train_val_split:.1%} train/val...")
+
+            all_features_jet1 = []
+            all_features_jet2 = []
+            all_labels = []
+
+            for filename, n_jets in zip(h5_files_train, n_jets_train):
+                features_jet1, features_jet2, labels = load_case_jets_from_h5(
+                    h5_filename=filename,
+                    feature_dict=feature_dict,
+                    n_jets=n_jets,
+                    jet_name=jet_name,
+                    **kwargs
+                )
+                # if filename has "supp" in it, change the labels to all 1s (signal)
+                if "supp" in filename:
+                    print(f"Original labels for {filename}: {labels[0]}")
+                    if labels[0] == 0:
+                        labels = np.ones_like(labels)
+                    elif labels[0] == 1:
+                        labels = np.zeros_like(labels)
+                    print(f"Modified labels for {filename} (supplementary data): {labels[0]}")
+                all_features_jet1.append(features_jet1)
+                all_features_jet2.append(features_jet2)
+                all_labels.append(labels)
+
+            # Concatenate all files
+            all_features_jet1 = ak.concatenate(all_features_jet1)
+            all_features_jet2 = ak.concatenate(all_features_jet2)
+            # Concatenate labels
+            all_labels = np.concatenate(all_labels)
+            
+            # Calculate split index
+            n_total = len(all_features_jet1)
+            n_train = int(n_total * train_val_split)
+
+            print(f"Total jets loaded: {n_total}, Training jets: {n_train}, Validation jets: {n_total - n_train}")
+            
+            # Shuffle before splitting
+            indices = np.random.permutation(n_total)
+            train_indices = indices[:n_train]
+            val_indices = indices[n_train:]
+            
+            print(f"Splitting {n_total} jets into {n_train} train / {n_total - n_train} val")
+            
+            # Split the data into train and val sets for both jets
+            train_features_jet1 = all_features_jet1[train_indices]
+            val_features_jet1 = all_features_jet1[val_indices]
+            train_features_jet2 = all_features_jet2[train_indices]
+            val_features_jet2 = all_features_jet2[val_indices]
+            train_labels = all_labels[train_indices]
+            val_labels = all_labels[val_indices]
+
+        else:
+            # Case where both jets are loaded and separate train/val files
+            raise NotImplementedError("Only train_val_split is supported in this custom loader.")
+        
+        # Pad and convert to numpy for jet1
+        train_features_padded_jet1, train_mask_jet1 = ak_pad(
+            train_features_jet1, maxlen=max_sequence_len, axis=1, fill_value=0.0, return_mask=True
+        )
+        val_features_padded_jet1, val_mask_jet1 = ak_pad(
+            val_features_jet1, maxlen=max_sequence_len, axis=1, fill_value=0.0, return_mask=True
+        )
+
+        # Pad and convert to numpy for jet2
+        train_features_padded_jet2, train_mask_jet2 = ak_pad(
+            train_features_jet2, maxlen=max_sequence_len, axis=1, fill_value=0.0, return_mask=True
+        )
+        val_features_padded_jet2, val_mask_jet2 = ak_pad(
+            val_features_jet2, maxlen=max_sequence_len, axis=1, fill_value=0.0, return_mask=True
+        )
+        
+        # Stack fields into a single array (n_jets, max_sequence_len, n_features)
+        feature_names = list(feature_dict.keys())
+        
+        # Stack training features for jet1
+        train_features_stacked_jet1 = ak.concatenate(
+            [train_features_padded_jet1[feat][..., np.newaxis] for feat in feature_names],
+            axis=-1
+        )
+        # Stack validation features for jet1
+        val_features_stacked_jet1 = ak.concatenate(
+            [val_features_padded_jet1[feat][..., np.newaxis] for feat in feature_names],
+            axis=-1
+        )
+
+        # Stack training features for jet2
+        train_features_stacked_jet2 = ak.concatenate(
+            [train_features_padded_jet2[feat][..., np.newaxis] for feat in feature_names],
+            axis=-1
+        )
+        # Stack validation features for jet2
+        val_features_stacked_jet2 = ak.concatenate(
+            [val_features_padded_jet2[feat][..., np.newaxis] for feat in feature_names],
+            axis=-1
+        )
+        
+        # Convert to numpy then to torch tensors
+        train_x_jet1 = torch.from_numpy(ak.to_numpy(train_features_stacked_jet1)).float()
+        train_mask_t_jet1 = torch.from_numpy(ak.to_numpy(train_mask_jet1)).float()
+        # Labels are now just a simple numpy array (0 or 1)
+        train_labels_t = torch.from_numpy(train_labels).long()
+        
+        val_x_jet1 = torch.from_numpy(ak.to_numpy(val_features_stacked_jet1)).float()
+        val_mask_t_jet1 = torch.from_numpy(ak.to_numpy(val_mask_jet1)).float()
+        # Labels are now just a simple numpy array (0 or 1)
+        val_labels_t = torch.from_numpy(val_labels).long()
+
+        train_x_jet2 = torch.from_numpy(ak.to_numpy(train_features_stacked_jet2)).float()
+        train_mask_t_jet2 = torch.from_numpy(ak.to_numpy(train_mask_jet2)).float()
+
+        val_x_jet2 = torch.from_numpy(ak.to_numpy(val_features_stacked_jet2)).float()
+        val_mask_t_jet2 = torch.from_numpy(ak.to_numpy(val_mask_jet2)).float()
+        
+        
+        print(f"Training data shape: {train_x_jet1.shape}, Labels: {train_labels_t.shape}")
+        print(f"  - Signal: {train_labels_t.sum()}, Background: {(1-train_labels_t).sum()}")
+        print(f"Validation data shape: {val_x_jet1.shape}, Labels: {val_labels_t.shape}")
+        print(f"  - Signal: {val_labels_t.sum()}, Background: {(1-val_labels_t).sum()}")
+
+
+    # Create custom dataset class
+    class JetDataset(Dataset):
+        def __init__(self, features, masks, labels, features_jet2=None, masks_jet2=None):
+            self.features = features
+            self.features_jet2 = features_jet2
+            self.masks = masks
+            self.masks_jet2 = masks_jet2
+            self.labels = labels
+            
+        def __len__(self):
+            return len(self.labels)
+        
+        def __getitem__(self, idx):
+            result = {
+                "part_features": self.features[idx],
+                "part_mask": self.masks[idx],
+                "jet_type_labels": self.labels[idx],
+                "jet_features": torch.tensor([]),
+            }
+            # Only include jet2 fields if they exist (for dijet mode)
+            if self.features_jet2 is not None:
+                result["part_features_jet2"] = self.features_jet2[idx]
+                result["part_mask_jet2"] = self.masks_jet2[idx]
+            return result
+    
+    if jet_name in ["jet1", "jet2"]:
+        # Create datasets
+        train_dataset = JetDataset(features=train_x, masks=train_mask_t, labels=train_labels_t)
+        val_dataset = JetDataset(features=val_x, masks=val_mask_t, labels=val_labels_t)
+
+    elif jet_name == "both":
+        # Create datasets with both jets
+        train_dataset = JetDataset(features=train_x_jet1, masks=train_mask_t_jet1, 
+                                   labels=train_labels_t, features_jet2=train_x_jet2, masks_jet2=train_mask_t_jet2)
+        val_dataset = JetDataset(features=val_x_jet1, masks=val_mask_t_jet1,
+                                 labels=val_labels_t, features_jet2=val_x_jet2, masks_jet2=val_mask_t_jet2)
+    
+    # Create DataLoaders
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=batch_size, 
+        shuffle=shuffle_train, 
+        num_workers=num_workers,
+        pin_memory=True,
+    )
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=batch_size, 
+        shuffle=False, 
+        num_workers=num_workers,
+        pin_memory=True,
+    )
+    
+    return train_loader, val_loader
+
 
 def create_case_h5_test_loader(
     h5_files_test,

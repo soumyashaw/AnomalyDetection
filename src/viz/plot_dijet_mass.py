@@ -328,7 +328,7 @@ if __name__ == "__main__":
                        help="Number of jets to load from each file")
     parser.add_argument("--bandwidth", type=float, default=50.0, 
                        help="KDE bandwidth in GeV")
-    parser.add_argument("--xlim", type=float, nargs=2, default=[1500, 7000], 
+    parser.add_argument("--xlim", type=float, nargs=2, default=(1500, 7000),
                        help="X-axis limits (min max) in GeV")
     parser.add_argument("--ylim", type=float, nargs=2, default=None, 
                        help="Y-axis limits (min max) for density. Use to prevent signal peak from dominating scale")

@@ -721,9 +721,9 @@ def main():
     }
 
     # CASE dataset files
-    signal_path = os.path.join(args.dataset_path, "QstarToQW_M_3000_mW_170_TuneCP2_13TeV-pythia8.h5")
-    supp_background_path = os.path.join(args.dataset_path, "background_1.h5")
-    background_path = os.path.join(args.dataset_path, "background_0.h5")
+    signal_path = os.path.join(args.dataset_path, "sn_QstarToQW_25k_SR_train.h5")
+    supp_background_path = os.path.join(args.dataset_path, "bg_100k_SR_supp.h5")
+    background_path = os.path.join(args.dataset_path, "bg_200k_SR_train.h5")
     
     h5_files_all = [signal_path, supp_background_path, background_path]
     print("n_jets_train:", args.n_jets_train)

@@ -42,6 +42,7 @@ import argparse
 import numpy as np
 import awkward as ak
 import lightning as L
+from collections.abc import Mapping
 from functools import partial
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, TensorDataset
@@ -58,9 +59,92 @@ import wandb
 from gabbro.utils.arrays import ak_pad
 from gabbro.data.data_utils import create_case_h5_dataloaders, create_lhco_h5_dataloaders
 from gabbro.models.backbone import BackboneClassificationLightning, BackboneDijetClassificationLightning, BackboneAachenClassificationLightning
+from gabbro.models.backbone_base import BackboneTransformer
 from gabbro.data.loading import load_lhco_jets_from_h5, load_multiple_h5_files
 
 load_dotenv()  # Load environment variables from .env file (for W&B API key, etc.)
+
+
+def _to_plain_dict(obj):
+    """Convert config-like containers (e.g., DictConfig) to plain dict recursively."""
+    if isinstance(obj, Mapping):
+        return {k: _to_plain_dict(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_to_plain_dict(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_to_plain_dict(v) for v in obj)
+    return obj
+
+
+class AttrDict(dict):
+    """Dict with attribute-style access (obj.key) while keeping dict behavior."""
+
+    def __getattr__(self, key):
+        try:
+            return self[key]
+        except KeyError as exc:
+            raise AttributeError(key) from exc
+
+    def __setattr__(self, key, value):
+        self[key] = value
+
+    def __delattr__(self, key):
+        try:
+            del self[key]
+        except KeyError as exc:
+            raise AttributeError(key) from exc
+
+
+def _to_attrdict(obj):
+    """Recursively convert mappings to AttrDict for cfg objects like embed_cfg."""
+    if isinstance(obj, Mapping):
+        return AttrDict({k: _to_attrdict(v) for k, v in obj.items()})
+    if isinstance(obj, list):
+        return [_to_attrdict(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_to_attrdict(v) for v in obj)
+    return obj
+
+
+def extract_pretrained_backbone_hparams(ckpt_path):
+    """Extract normalized backbone hyperparameters from a checkpoint.
+
+    Returns
+    -------
+    dict
+        Flattened backbone configuration dict, or empty dict if unavailable.
+    """
+    try:
+        ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=True)
+    except TypeError:
+        ckpt = torch.load(ckpt_path, map_location='cpu')
+
+    if not isinstance(ckpt, dict):
+        return {}
+
+    hparams = ckpt.get('hyper_parameters', {})
+    if not hparams:
+        hparams = ckpt.get('hparams', {})
+    if not hparams:
+        hparams = ckpt.get('hparams_dict', {})
+
+    if isinstance(hparams, Mapping):
+        hparams = _to_plain_dict(hparams)
+    else:
+        hparams = {}
+
+    if hparams and 'backbone_cfg' in hparams and 'embedding_dim' not in hparams:
+        if isinstance(hparams['backbone_cfg'], Mapping):
+            hparams = _to_plain_dict(hparams['backbone_cfg'])
+
+    if hparams and 'model_kwargs' in hparams and 'embedding_dim' not in hparams:
+        model_kwargs = hparams.get('model_kwargs', {})
+        if isinstance(model_kwargs, Mapping) and 'backbone_cfg' in model_kwargs:
+            hparams = _to_plain_dict(model_kwargs['backbone_cfg'])
+        elif isinstance(model_kwargs, Mapping) and 'embedding_dim' in model_kwargs:
+            hparams = _to_plain_dict(model_kwargs)
+
+    return hparams if isinstance(hparams, dict) else {}
 
 class ExperimentLogger:
     """Handles logging of experiment configuration and results."""
@@ -322,7 +406,7 @@ class ARGOSCallback(Callback):
                 labels = batch["jet_type_labels"].to(device)
                 
                 # Check if model is dijet or single-jet
-                if isinstance(pl_module, BackboneDijetClassificationLightning):
+                if isinstance(pl_module, BackboneAachenClassificationLightning):
                     X1 = batch["part_features"].to(device)
                     X2 = batch["part_features_jet2"].to(device)
                     mask1 = batch["part_mask"].to(device)
@@ -332,8 +416,14 @@ class ARGOSCallback(Callback):
                     X = batch["part_features"].to(device)
                     mask = batch["part_mask"].to(device)
                     logits = pl_module(X, mask)
-                
-                probs = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
+
+                # Handle different logit shapes
+                if logits.dim() == 1:
+                    # Binary classification with single logit (BCEWithLogitsLoss)
+                    probs = torch.sigmoid(logits).cpu().numpy()
+                else:
+                    # Multi-class with softmax
+                    probs = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
                 all_preds.append(probs)
                 all_labels.append(labels.cpu().numpy())
 
@@ -377,58 +467,139 @@ def load_pretrained_backbone(model, ckpt_path, strict=False):
     Returns
     -------
     dict
-        Dictionary with 'missing_keys' and 'unexpected_keys' from the load operation
+        Dictionary with loading diagnostics
     """
     print(f"Loading pre-trained backbone weights from: {ckpt_path}")
     
-    # Load checkpoint
-    ckpt = torch.load(ckpt_path, map_location='cpu')
+    # Load checkpoint. Prefer weights_only for safer deserialization when available.
+    try:
+        ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=True)
+    except TypeError:
+        ckpt = torch.load(ckpt_path, map_location='cpu')
     
     # Extract state_dict from checkpoint
     if isinstance(ckpt, dict) and 'state_dict' in ckpt:
-        # Lightning checkpoint format
         state_dict = ckpt['state_dict']
     else:
-        # Raw state_dict or direct model state
         state_dict = ckpt
+
+    # Recover checkpoint backbone hyperparameters (same approach as eval_backbone.py).
+    hparams = extract_pretrained_backbone_hparams(ckpt_path)
     
     # Extract backbone state_dict and remove 'backbone.' prefix if present
     backbone_state_dict = {}
     for key, value in state_dict.items():
         if key.startswith('backbone.'):
-            # Remove 'backbone.' prefix from Lightning checkpoint
             new_key = key[len('backbone.'):]
             backbone_state_dict[new_key] = value
         elif not any(key.startswith(prefix) for prefix in ['class_head', 'head', 'embedding_projection', 
                                                              'encoder_layer', 'cross_attn', 'fusion_proj']):
-            # Include keys that don't belong to the classification head
             backbone_state_dict[key] = value
     
     if not backbone_state_dict:
-        # If no backbone-specific keys found, try using all keys (for pure backbone checkpoints)
         backbone_state_dict = state_dict
         print("Warning: No 'backbone.' prefix found. Using all keys from checkpoint.")
+
+    # Eval-style path: instantiate BackboneTransformer from checkpoint hparams,
+    # load checkpoint weights there, then swap it into the Lightning model.
+    if hparams and 'embedding_dim' in hparams:
+        try:
+            print("Instantiating BackboneTransformer with checkpoint hyperparameters...")
+            hparams_for_model = _to_attrdict(hparams)
+            ckpt_backbone = BackboneTransformer(**hparams_for_model)
+            ckpt_backbone.load_state_dict(backbone_state_dict, strict=strict)
+
+            # Ensure replaced backbone is compatible with training dataloader's jet feature shape.
+            current_jet_dim = getattr(model.backbone, "jet_features_input_dim", None)
+            ckpt_jet_dim = getattr(ckpt_backbone, "jet_features_input_dim", None)
+            if (
+                current_jet_dim is not None
+                and ckpt_jet_dim is not None
+                and current_jet_dim != ckpt_jet_dim
+            ):
+                print(
+                    f"Warning: Checkpoint backbone jet_features_input_dim ({ckpt_jet_dim}) "
+                    f"differs from current model ({current_jet_dim}). "
+                    "Skipping full backbone replacement and falling back to partial in-place loading."
+                )
+                raise ValueError(
+                    f"Incompatible jet feature dims: checkpoint={ckpt_jet_dim}, current={current_jet_dim}"
+                )
+
+            model.backbone = ckpt_backbone
+            print("Successfully replaced model.backbone with checkpoint-configured backbone.")
+            return {
+                "mode": "replaced_backbone_from_hparams",
+                "missing_keys": [],
+                "unexpected_keys": [],
+                "skipped_missing_key": [],
+                "skipped_shape_mismatch": [],
+            }
+        except Exception as e:
+            print(
+                f"Warning: Could not rebuild backbone from checkpoint hyperparameters "
+                f"({type(e).__name__}: {e}). Falling back to partial in-place loading into current backbone."
+            )
     
-    # Load state_dict into model.backbone
-    result = model.backbone.load_state_dict(backbone_state_dict, strict=strict)
+    # Filter keys that do not exist in current backbone or have incompatible tensor shapes.
+    current_backbone_state = model.backbone.state_dict()
+    filtered_backbone_state = {}
+    skipped_missing_key = []
+    skipped_shape_mismatch = []
+
+    for key, value in backbone_state_dict.items():
+        if key not in current_backbone_state:
+            skipped_missing_key.append(key)
+            continue
+
+        if current_backbone_state[key].shape != value.shape:
+            skipped_shape_mismatch.append(
+                (key, tuple(value.shape), tuple(current_backbone_state[key].shape))
+            )
+            continue
+
+        filtered_backbone_state[key] = value
+
+    if skipped_missing_key:
+        print(
+            f"Warning: Skipping {len(skipped_missing_key)} pretrained backbone keys not present in current model."
+        )
+
+    if skipped_shape_mismatch:
+        print(
+            f"Warning: Skipping {len(skipped_shape_mismatch)} pretrained backbone keys due to shape mismatch."
+        )
+        for key, ckpt_shape, model_shape in skipped_shape_mismatch:
+            print(f"  Shape mismatch for '{key}': checkpoint {ckpt_shape} vs model {model_shape}")
+
+    # Keep strict only if explicitly requested and no incompatible keys were skipped.
+    effective_strict = strict and not skipped_missing_key and not skipped_shape_mismatch
+
+    # Load compatible subset into model.backbone
+    result = model.backbone.load_state_dict(filtered_backbone_state, strict=effective_strict)
     missing_keys = result[0] if isinstance(result, tuple) else []
     unexpected_keys = result[1] if isinstance(result, tuple) else []
     
     if missing_keys:
         msg = f"Missing keys in backbone checkpoint: {missing_keys}"
-        if strict:
-            logger.error(msg)
+        if effective_strict:
             raise RuntimeError(msg)
         else:
-            logger.warning(msg)
+            print(f"Warning: {msg}")
     
     if unexpected_keys:
         msg = f"Unexpected keys in backbone checkpoint: {unexpected_keys}"
-        logger.warning(msg)
+        print(f"Warning: {msg}")
     
-    print(f"Successfully loaded backbone weights from: {ckpt_path}")
+    print(f"Successfully loaded compatible backbone weights from: {ckpt_path}")
     
-    return {"missing_keys": missing_keys, "unexpected_keys": unexpected_keys}
+    return {
+        "mode": "partial_in_place_load",
+        "missing_keys": missing_keys,
+        "unexpected_keys": unexpected_keys,
+        "skipped_missing_key": skipped_missing_key,
+        "skipped_shape_mismatch": skipped_shape_mismatch,
+    }
 
 
 def load_backbone_weights(model, ckpt_path, strict=False):
@@ -530,8 +701,8 @@ def main():
         "part_phirel": {"multiply_by": 3}
     }
 
-    signal_path = os.path.join(args.dataset_path, "QstarToQW_M_3000_mW_170_TuneCP2_13TeV-pythia8.h5")
-    background_path = os.path.join(args.dataset_path, "background_0.h5")
+    signal_path = os.path.join(args.dataset_path, "sn_QstarToQW_25k_SR_train.h5")
+    background_path = os.path.join(args.dataset_path, "bg_200k_SR_train.h5")
     
     h5_files_all = [signal_path, background_path]
 
@@ -827,17 +998,15 @@ def main():
     print("Starting training...")
     trainer = L.Trainer(
         max_steps=args.max_steps,
-        accelerator="auto",
+        accelerator="gpu",
         devices=1,
         logger=loggers,
-        callbacks=[checkpoint_callback, auc_callback, argos_callback, early_stop_callback],
+        callbacks=[checkpoint_callback, auc_callback, argos_callback],
         log_every_n_steps=20,
-        val_check_interval=0.1,  # Validate every 10% of training data
         gradient_clip_val=1.0,
         precision="32",
         enable_progress_bar=not args.use_hpc,
         num_nodes=1,
-        enable_model_summary=True,
     )
 
     # ============================================================

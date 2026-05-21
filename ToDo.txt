@@ -13,21 +13,44 @@
 [✓] Design and run an experiment to show Grokking effect (maybe test on every 10 epochs)
 [✓] Get GPU access
 [✓] Restore saving top 3 checkpoints after Grokking expt for train_custom.py and train_custom_aachen.py
-[ ] Pretrain model on JetClass data
-[ ] Run finetuning on the pre-trained model of Supervised and Weakly supervised cases
-[ ] Use the new metric suggested by Marie for Training
-[ ] Test the setup on Non idealised Anomaly Detection (CwoLa case)
+[✓] Pretrain model on JetClass data
+[✓] Run finetuning on the pre-trained model of Supervised and Weakly supervised cases
+[✓] Use the new metric suggested by Marie for Training
+[✓] Test the setup on Non idealised Anomaly Detection (CwoLa case)
 [ ] Write the thesis document
-[ ] Rename the 8k
 
 [ ] Find PhD groups and positions
 [ ] Fix CV for CERN application
 
 Currently running:
-[ ] python -m src.poc_expts.expt_grad_accumulation_aachen --gpu_id 0 --jet_name both --merge_strategy concat --naming_identifier accum_8x --accumulation_steps 8 --use_wandb (600 jets)
-[ ] python -m src.poc_expts.expt_grad_accumulation_aachen --gpu_id 0 --jet_name both --merge_strategy concat --naming_identifier accum_16x_weak_600 --accumulation_steps 16 --use_wandb
-[ ] python -m src.poc_expts.expt_grad_accumulation_aachen --gpu_id 0 --jet_name both --merge_strategy concat --naming_identifier accum_4x_weak_600 --accumulation_steps 4 --use_wandb
-[ ] python -m src.poc_expts.expt_grad_accumulation_aachen --gpu_id 0 --jet_name both --merge_strategy concat --naming_identifier accum_8x --accumulation_steps 8 --use_wandb
+[ ] python -m src.train.train_cwola_aachen --naming_identifier weak_2k_cwola_aachen_seed42 --use_hpc --use_wandb
+[ ] python -m src.train.train_cwola_aachen --naming_identifier weak_5k_cwola_aachen_seed42 --use_hpc --use_wandb
+[ ] python -m src.train.train_cwola_aachen --naming_identifier weak_600_cwola_aachen_seed42 --use_hpc --use_wandb
+[ ] python -m src.train.train_cwola_aachen --naming_identifier weak_600_cwola_pretrained_update_aachen_seed42 --pretrained_ckpt backbone_weights/pretrained_class_1M_each/backbone.ckpt --load_pretrained --update_backbone --use_hpc --use_wandb
+[ ] python -m src.train.train_cwola_aachen --naming_identifier weak_600_cwola_pretrained_freeze_aachen_seed42 --pretrained_ckpt backbone_weights/pretrained_class_1M_each/backbone.ckpt --load_pretrained --freeze_backbone --use_hpc --use_wandb
 
 Next:
-[ ] python -m src.poc_expts.expt_grad_accumulation_aachen --gpu_id 0 --jet_name both --merge_strategy concat --naming_identifier accum_1x_weak_600 --accumulation_steps 1 --use_wandb (change to 600)
+Sample data for CWoLa
+[ ] 10k -> seed2
+[ ] 10k -> seed17
+[ ] 10k -> seed73
+[ ] 10k -> seed109
+[ ] 10k -> seed256
+
+[ ] 5k -> seed2
+[ ] 5k -> seed17
+[ ] 5k -> seed73
+[ ] 5k -> seed109
+[ ] 5k -> seed256
+
+[ ] 2k -> seed2
+[ ] 2k -> seed17
+[ ] 2k -> seed73
+[ ] 2k -> seed109
+[ ] 2k -> seed256
+
+[ ] 600 -> seed2
+[ ] 600 -> seed17
+[ ] 600 -> seed73
+[ ] 600 -> seed109
+[ ] 600 -> seed256

@@ -857,6 +857,7 @@ class ModelEvaluator:
         print("EVALUATION COMPLETE")
         print(f"Results saved to: {self.eval_dir}")
         print("=" * 80 + "\n")
+        print(f"{metrics['roc_auc']:.4f} & {metrics['r30']:.0f} & {metrics['max_sic']:.4f}")
         
         return metrics
 

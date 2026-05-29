@@ -10,7 +10,6 @@
 #SBATCH --output=batchSubmissions/train_custom_%j.out
 #SBATCH --error=batchSubmissions/train_custom_%j.err
 
-set -euo pipefail
 mkdir -p batchSubmissions
 
 bash scripts/train_custom.sh

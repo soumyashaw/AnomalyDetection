@@ -1,0 +1,19 @@
+Experiment: run_weak_5k_avg_seed256_20260526_224609
+================================================================================
+
+CONFIGURATION:
+--------------------------------------------------------------------------------
+data: {'dataset_path': '/rwthfs/rz/cluster/work/rww74320/LHCO', 'signal_file': '/rwthfs/rz/cluster/work/rww74320/LHCO/sn_25k_SR_train.h5', 'supp_background_file': '/rwthfs/rz/cluster/work/rww74320/LHCO/bg_100k_SR_supp.h5', 'background_file': '/rwthfs/rz/cluster/work/rww74320/LHCO/bg_200k_SR_train.h5', 'n_jets_train': [5000, 100000, 200000], 'batch_size': 1024, 'max_sequence_len': 128, 'mom4_format': 'epxpypz', 'train_val_split': 0.7, 'features': ['part_pt', 'part_etarel', 'part_phirel'], 'feature_preprocessing': {'part_pt': {'multiply_by': 1, 'subtract_by': 1.8, 'func': 'signed_log', 'inv_func': 'signed_exp'}, 'part_etarel': {'multiply_by': 3}, 'part_phirel': {'multiply_by': 3}}, 'shuffle_train': True, 'jet_name': 'both'}
+model: {'architecture': 'BackboneDijetClassificationLightning', 'merge_strategy': 'average', 'class_head_type': 'class_attention', 'use_continuous_input': True, 'num_parameters': 1738498, 'embedding_dim': 128, 'n_transformer_blocks': 8, 'num_attention_heads': 8, 'max_sequence_len': 128, 'n_output_classes': 2, 'pretrained_checkpoint': None, 'load_pretrained': False, 'model_kwargs': {'embedding_dim': 128, 'max_sequence_len': 128, 'n_out_nodes': 2, 'embed_cfg': {'type': 'continuous_project_add', 'intermediate_dim': None}, 'transformer_cfg': {'dim': 128, 'n_blocks': 8, 'norm_after_blocks': True, 'residual_cfg': {'gate_type': 'local', 'init_value': 1}, 'attn_cfg': {'num_heads': 8, 'dropout_rate': 0.1, 'norm_before': True, 'norm_after': False}, 'mlp_cfg': {'dropout_rate': 0.0, 'norm_before': True, 'expansion_factor': 4, 'activation': 'GELU'}}, 'class_head_hidden_dim': 128, 'class_head_num_heads': 8, 'class_head_num_CA_blocks': 2, 'class_head_num_SA_blocks': 0, 'class_head_dropout_rate': 0.1, 'jet_features_input_dim': 0, 'apply_causal_mask': False, 'zero_padded_start_particle': False, 'class_weights': [0.7625, 1.4523809523809523]}}
+training: {'optimizer': 'AdamW', 'optimizer_params': {'lr': 0.0002, 'weight_decay': 0.01}, 'scheduler': 'ConstantLR', 'max_steps': 1000000, 'gradient_clip_val': 1.0, 'precision': '32', 'early_stopping_patience': 15, 'early_stopping_monitor': 'val_argos', 'checkpoint_monitor': 'val_argos', 'checkpoint_mode': 'max', 'load_pretrained': False, 'pretrained_ckpt': None, 'use_class_weights': True, 'class_weights': [0.7625, 1.4523809523809523]}
+system: {'device': 'cuda:0', 'gpu_id': 0, 'random_seed': 256, 'timestamp_start': '2026-05-26T23:15:29.766484'}
+
+RESULTS:
+--------------------------------------------------------------------------------
+best_model_path: /home/rww74320/AnomalyDetection/dijet_expts/run_weak_5k_avg_seed256_20260526_224609/checkpoints/epoch=02_val_argos=0.0156.ckpt
+best_model_score: 0.015599746257066727
+current_epoch: 33
+global_step: 6897
+training_completed: True
+timestamp_end: 2026-05-26T23:59:53.373967
+final_metrics: {'train_loss': 0.6932559013366699, 'train_loss_step': 0.6960591673851013, 'train_acc': 0.4483185112476349, 'train_acc_step': 0.35039371252059937, 'val_loss': 0.6929202079772949, 'val_loss_epoch': 0.6929202079772949, 'val_acc': 0.34378141164779663, 'val_acc_epoch': 0.34378141164779663, 'val_auc': 0.5009617209434509, 'val_argos': 0.0010188901796936989, 'train_loss_epoch': 0.6932559013366699, 'train_acc_epoch': 0.4483185112476349, 'epoch_train_duration_minutes': 1.3284376859664917}

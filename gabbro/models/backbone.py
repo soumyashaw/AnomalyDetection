@@ -2104,6 +2104,10 @@ class BackboneDijetClassificationLightning(L.LightningModule):
             # Double the max_sequence_len
             model_kwargs["max_sequence_len"] *= 2
 
+        elif merge_strategy == "weighted_sum":
+            # Learnable weight for combining jet embeddings
+            self.alpha = nn.Parameter(torch.tensor(0.5))
+
         elif merge_strategy == "attention":
             self.cross_attn_1_to_2 = nn.MultiheadAttention(
                     model_kwargs["embedding_dim"], 
@@ -2195,8 +2199,7 @@ class BackboneDijetClassificationLightning(L.LightningModule):
             mask = mask1_bool & mask2_bool # Shape: (B, 128)
 
         elif self.merge_strategy == "weighted_sum":
-            alpha = nn.Parameter(torch.tensor(0.5))
-            embeddings = alpha * embeddings_1 + (1 - alpha) * embeddings_2 # Shape: (B, 128, 128)
+            embeddings = self.alpha * embeddings_1 + (1 - self.alpha) * embeddings_2 # Shape: (B, 128, 128)
             mask = mask1_bool & mask2_bool # Shape: (B, 128)
 
         elif self.merge_strategy == "attention":
@@ -2378,6 +2381,10 @@ class BackboneAachenClassificationLightning(L.LightningModule):
             # Double the max_sequence_len
             model_kwargs["max_sequence_len"] *= 2
 
+        elif merge_strategy == "weighted_sum":
+            # Learnable weight for combining jet embeddings
+            self.alpha = nn.Parameter(torch.tensor(0.5))
+
         elif merge_strategy == "attention":
             self.cross_attn_1_to_2 = nn.MultiheadAttention(
                     model_kwargs["embedding_dim"], 
@@ -2456,8 +2463,7 @@ class BackboneAachenClassificationLightning(L.LightningModule):
             mask = mask1_bool & mask2_bool # Shape: (B, 128)
 
         elif self.merge_strategy == "weighted_sum":
-            alpha = nn.Parameter(torch.tensor(0.5))
-            embeddings = alpha * embeddings_1 + (1 - alpha) * embeddings_2 # Shape: (B, 128, 128)
+            embeddings = self.alpha * embeddings_1 + (1 - self.alpha) * embeddings_2 # Shape: (B, 128, 128)
             mask = mask1_bool & mask2_bool # Shape: (B, 128)
 
         elif self.merge_strategy == "attention":

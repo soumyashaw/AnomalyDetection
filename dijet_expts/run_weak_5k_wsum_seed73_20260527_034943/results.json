@@ -1,0 +1,23 @@
+{
+    "best_model_path": "/home/rww74320/AnomalyDetection/dijet_expts/run_weak_5k_wsum_seed73_20260527_034943/checkpoints/epoch=19_val_argos=0.0601.ckpt",
+    "best_model_score": 0.06006050109863281,
+    "current_epoch": 50,
+    "global_step": 10450,
+    "training_completed": true,
+    "timestamp_end": "2026-05-27T05:26:49.334907",
+    "final_metrics": {
+        "train_loss": 0.6932637691497803,
+        "train_loss_step": 0.7016535401344299,
+        "train_acc": 0.47966277599334717,
+        "train_acc_step": 0.36220473051071167,
+        "val_loss": 0.6929382681846619,
+        "val_loss_epoch": 0.6929382681846619,
+        "val_acc": 0.3438141942024231,
+        "val_acc_epoch": 0.3438141942024231,
+        "val_auc": 0.49402180314064026,
+        "val_argos": 0.0014989235205575824,
+        "train_loss_epoch": 0.6932637691497803,
+        "train_acc_epoch": 0.47966277599334717,
+        "epoch_train_duration_minutes": 1.3287779092788696
+    }
+}

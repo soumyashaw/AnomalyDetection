@@ -1,6 +1,0 @@
-{
-    "training_completed": false,
-    "error": "[Errno 32] Broken pipe",
-    "error_type": "BrokenPipeError",
-    "timestamp_error": "2026-05-12T00:53:18.178787"
-}

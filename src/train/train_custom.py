@@ -694,7 +694,7 @@ def main():
         "max_steps": args.max_steps,
         "gradient_clip_val": 1.0,
         "precision": "32",
-        "early_stopping_patience": 15,
+        "early_stopping_patience": None,
         "early_stopping_monitor": "val_argos",
         "checkpoint_monitor": "val_argos",
         "checkpoint_mode": "max",
@@ -722,15 +722,15 @@ def main():
     exp_logger.log_config(full_config)
     print(f"Configuration saved to: {exp_logger.run_dir / 'config.json'}")
     
-    # # Setup callbacks
-    # checkpoint_callback = ModelCheckpoint(
-    #     dirpath=exp_logger.get_checkpoint_dir(),
-    #     filename="{epoch:02d}_{val_loss:.4f}",
-    #     monitor="val_loss",
-    #     mode="min",
-    #     save_top_k=1,
-    #     save_last=False
-    # )
+    # Setup callbacks
+    checkpoint_callback_loss = ModelCheckpoint(
+        dirpath=exp_logger.get_checkpoint_dir(),
+        filename="{epoch:02d}_{val_loss:.4f}",
+        monitor="val_loss",
+        mode="min",
+        save_top_k=1,
+        save_last=False
+    )
 
     # Alternatively, monitor AUC instead of loss
     # checkpoint_callback = ModelCheckpoint(
@@ -743,7 +743,7 @@ def main():
     # )
 
     # Or using ARGOS metric
-    checkpoint_callback = ModelCheckpoint(
+    checkpoint_callback_argos = ModelCheckpoint(
         dirpath=exp_logger.get_checkpoint_dir(),
         filename="{epoch:02d}_{val_argos:.4f}",
         monitor="val_argos",
@@ -799,7 +799,7 @@ def main():
         accelerator="auto",
         devices=1,
         logger=loggers if loggers else False,
-        callbacks=[checkpoint_callback, auc_callback, argos_callback, early_stop_callback],
+        callbacks=[checkpoint_callback_loss, checkpoint_callback_argos, auc_callback, argos_callback],
         log_every_n_steps=20,
         gradient_clip_val=1,
         precision="32",
@@ -818,12 +818,12 @@ def main():
         )
         
         # Log final results
-        exp_logger.log_final_results(trainer, checkpoint_callback)
+        exp_logger.log_final_results(trainer, checkpoint_callback_argos)
         
         print("\n" + "=" * 80)
         print("Training complete!")
-        print(f"Best checkpoint: {checkpoint_callback.best_model_path}")
-        print(f"Best validation loss: {checkpoint_callback.best_model_score:.4f}")
+        print(f"Best checkpoint: {checkpoint_callback_argos.best_model_path}")
+        print(f"Best validation ARGOS: {checkpoint_callback_argos.best_model_score:.4f}")
         print(f"Results saved to: {exp_logger.run_dir}")
         if args.use_wandb:
             print(f"W&B run: {wandb.run.url}")

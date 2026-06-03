@@ -1,0 +1,15 @@
+#!/bin/bash
+#SBATCH --job-name=train_case
+#SBATCH --partition=c23g
+#SBATCH --time=18:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=16G
+#SBATCH --gres=gpu:1
+#SBATCH --output=batchSubmissions/train_case_%j.out
+#SBATCH --error=batchSubmissions/train_case_%j.err
+
+mkdir -p batchSubmissions
+
+bash scripts/train_case.sh

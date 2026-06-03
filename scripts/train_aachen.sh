@@ -15,7 +15,7 @@ apptainer exec --nv "$IMG" bash -lc '
     source /opt/conda/bin/activate
     cd "$HOME/AnomalyDetection"
 
-    python -m src.train.train_custom_aachen --jet_name both --merge_strategy concat --naming_identifier optim_weak_2k_pretrain_class10M_freeze_aachen_seed73 --seed 73 --pretrained_ckpt backbone_weights/pretrained_class_1M_each/backbone.ckpt --load_pretrained --freeze_backbone --use_hpc --use_wandb
+    python -m src.train.train_custom_aachen --jet_name both --merge_strategy concat --naming_identifier weak_2k_concat_seed256 --seed 256 --use_wandb --use_hpc
 '
 
 echo "Job finished."

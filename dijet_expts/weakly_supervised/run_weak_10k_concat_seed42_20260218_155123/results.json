@@ -1,0 +1,22 @@
+{
+    "best_model_path": "/home/sshaw/AnomalyDetection/dijet_expts/run_20260218_155123/checkpoints/anomaly_detector_epoch=195_val_loss=0.6694.ckpt",
+    "best_model_score": 0.669374406337738,
+    "current_epoch": 295,
+    "global_step": 1000000,
+    "training_completed": true,
+    "timestamp_end": "2026-02-19T15:36:57.794667",
+    "final_metrics": {
+        "train_loss": 0.6579389572143555,
+        "train_loss_step": 0.6596014499664307,
+        "train_acc": 0.6307349801063538,
+        "train_acc_step": 0.65625,
+        "val_loss": 0.6807620525360107,
+        "val_loss_epoch": 0.6807620525360107,
+        "val_acc": 0.6033333539962769,
+        "val_acc_epoch": 0.6033333539962769,
+        "val_auc": 0.5366333723068237,
+        "train_loss_epoch": 0.6579389572143555,
+        "train_acc_epoch": 0.6307349801063538,
+        "epoch_train_duration_minutes": 3.2270989418029785
+    }
+}

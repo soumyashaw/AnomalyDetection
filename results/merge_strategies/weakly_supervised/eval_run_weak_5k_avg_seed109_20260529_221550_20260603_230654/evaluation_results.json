@@ -1,0 +1,58 @@
+{
+    "checkpoint_path": "dijet_expts/run_weak_5k_avg_seed109_20260529_221550/checkpoints/epoch=40_val_loss=0.6938.ckpt",
+    "evaluation_timestamp": "20260603_230654",
+    "metrics": {
+        "roc_auc": 0.43837398490000007,
+        "average_precision": 0.19026898088152744,
+        "accuracy": 0.2,
+        "sensitivity": 1.0,
+        "specificity": 0.0,
+        "threshold_used": 0.5,
+        "optimal_threshold": 0.5017814636230469,
+        "confusion_matrix": [
+            [
+                0,
+                200000
+            ],
+            [
+                0,
+                50000
+            ]
+        ],
+        "classification_report": {
+            "Background": {
+                "precision": 0.0,
+                "recall": 0.0,
+                "f1-score": 0.0,
+                "support": 200000.0
+            },
+            "Signal": {
+                "precision": 0.2,
+                "recall": 1.0,
+                "f1-score": 0.3333333333333333,
+                "support": 50000.0
+            },
+            "accuracy": 0.2,
+            "macro avg": {
+                "precision": 0.1,
+                "recall": 0.5,
+                "f1-score": 0.16666666666666666,
+                "support": 250000.0
+            },
+            "weighted avg": {
+                "precision": 0.04,
+                "recall": 0.2,
+                "f1-score": 0.06666666666666665,
+                "support": 250000.0
+            }
+        },
+        "n_samples": 250000,
+        "n_signal": 50000,
+        "n_background": 200000,
+        "r30": 2.4522726436725235,
+        "r30_tpr": 0.21344,
+        "r30_status": "ok",
+        "max_sic": 1.0859206382582376
+    },
+    "device": "cuda:0"
+}

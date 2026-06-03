@@ -1,0 +1,37 @@
+================================================================================
+ANOMALY DETECTION MODEL EVALUATION
+================================================================================
+
+Checkpoint: dijet_expts/run_weak_5k_wsum_seed73_20260530_134807/checkpoints/epoch=110_val_loss=0.6929.ckpt
+Evaluation Time: 2026-06-03 23:04:54
+Device: cuda:0
+
+--------------------------------------------------------------------------------
+METRICS
+--------------------------------------------------------------------------------
+ROC AUC:              0.4075
+Average Precision:    0.1855
+Accuracy:             0.8000
+Sensitivity (TPR):    0.0000
+Specificity (TNR):    1.0000
+Threshold Used:       0.5000
+Optimal Threshold:    inf
+R30 (30% TPR):        1.0000
+R30 Actual TPR:       0.1296
+R30 Status:           insufficient_efficiency
+Max SIC:                  1.0000
+
+--------------------------------------------------------------------------------
+DATA STATISTICS
+--------------------------------------------------------------------------------
+Total Samples:        250000
+Signal Jets:          50000
+Background Jets:      200000
+
+--------------------------------------------------------------------------------
+CONFUSION MATRIX
+--------------------------------------------------------------------------------
+True Negatives:  200000
+False Positives: 0
+False Negatives: 50000
+True Positives:  0

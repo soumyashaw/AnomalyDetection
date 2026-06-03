@@ -1,0 +1,58 @@
+{
+    "checkpoint_path": "dijet_expts/run_weak_5k_concat_seed256_20260531_043334/checkpoints/epoch=564_val_loss=0.6929.ckpt",
+    "evaluation_timestamp": "20260603_230805",
+    "metrics": {
+        "roc_auc": 0.52177855145,
+        "average_precision": 0.20722771484252214,
+        "accuracy": 0.8,
+        "sensitivity": 0.0,
+        "specificity": 1.0,
+        "threshold_used": 0.5,
+        "optimal_threshold": 0.4993470311164856,
+        "confusion_matrix": [
+            [
+                200000,
+                0
+            ],
+            [
+                50000,
+                0
+            ]
+        ],
+        "classification_report": {
+            "Background": {
+                "precision": 0.8,
+                "recall": 1.0,
+                "f1-score": 0.8888888888888888,
+                "support": 200000.0
+            },
+            "Signal": {
+                "precision": 0.0,
+                "recall": 0.0,
+                "f1-score": 0.0,
+                "support": 50000.0
+            },
+            "accuracy": 0.8,
+            "macro avg": {
+                "precision": 0.4,
+                "recall": 0.5,
+                "f1-score": 0.4444444444444444,
+                "support": 250000.0
+            },
+            "weighted avg": {
+                "precision": 0.64,
+                "recall": 0.8,
+                "f1-score": 0.7111111111111111,
+                "support": 250000.0
+            }
+        },
+        "n_samples": 250000,
+        "n_signal": 50000,
+        "n_background": 200000,
+        "r30": 1.0,
+        "r30_tpr": 0.0,
+        "r30_status": "no_discrimination",
+        "max_sic": 1.1931180051579617
+    },
+    "device": "cuda:0"
+}

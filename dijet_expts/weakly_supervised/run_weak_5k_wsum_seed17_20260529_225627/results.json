@@ -1,0 +1,23 @@
+{
+    "best_model_path": "/.automount/home/home__home3/institut_thp/soshaw/AnomalyDetection/dijet_expts/run_weak_5k_wsum_seed17_20260529_225627/checkpoints/epoch=19_val_argos=0.0441.ckpt",
+    "best_model_score": 0.04410745948553085,
+    "current_epoch": 300,
+    "global_step": 1000000,
+    "training_completed": true,
+    "timestamp_end": "2026-05-30T19:33:14.931958",
+    "final_metrics": {
+        "train_loss": 0.6927595734596252,
+        "train_loss_step": 0.7394731044769287,
+        "train_acc": 0.5102770328521729,
+        "train_acc_step": 0.5625,
+        "val_loss": 0.6937749981880188,
+        "val_loss_epoch": 0.6937749981880188,
+        "val_acc": 0.3455737829208374,
+        "val_acc_epoch": 0.3455737829208374,
+        "val_auc": 0.5,
+        "val_argos": 0.0,
+        "train_loss_epoch": 0.6927595734596252,
+        "train_acc_epoch": 0.5102770328521729,
+        "epoch_train_duration_minutes": 2.0827503204345703
+    }
+}

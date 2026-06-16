@@ -1,0 +1,13 @@
+# Request resources
+request_gpus   = 1
+request_cpus   = 1
+request_memory = 16GB
+
+# Files
+executable = scripts/train_anchor.sh
+output     = batchSubmissions/train_anchor_$(Cluster)_$(Process)_$(UnixTime).out
+error      = batchSubmissions/train_anchor_$(Cluster)_$(Process)_$(UnixTime).err
+log        = batchSubmissions/train_anchor_$(Cluster)_$(UnixTime).log
+
+# Queue job
+queue

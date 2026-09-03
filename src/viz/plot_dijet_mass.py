@@ -128,38 +128,27 @@ def plot_dijet_mass_distribution(
         # For signal, use all data (labels == 0 OR labels == 1)
         mjj_signal = mjj  # All data regardless of label
         
-        # Plot background
-        if len(mjj_background) > 0:
-            kde_bg = gaussian_kde(mjj_background, bw_method=bandwidth / mjj_background.std())
-            density_bg = kde_bg(x_eval)
-            if not normalize:
-                density_bg = density_bg * len(mjj_background)
-            ax.fill_between(x_eval, density_bg, alpha=0.7, color='cyan', 
-                            label='background', linewidth=2, edgecolor='darkcyan')
-        
-        # Plot signal (all data)
+        # Plot signal first (all data)
         if len(mjj_signal) > 0:
             kde_sig = gaussian_kde(mjj_signal, bw_method=bandwidth / mjj_signal.std())
             density_sig = kde_sig(x_eval)
             if not normalize:
                 density_sig = density_sig * len(mjj_signal)
-            ax.fill_between(x_eval, density_sig, alpha=0.7, color='darkred',
-                            label='signal', linewidth=2, edgecolor='maroon')
+            ax.fill_between(x_eval, density_sig, alpha=1, color='#fbb4ae',
+                            label='signal', linewidth=1, edgecolor='#D6938A')
+        
+        # Plot background on top
+        if len(mjj_background) > 0:
+            kde_bg = gaussian_kde(mjj_background, bw_method=bandwidth / mjj_background.std())
+            density_bg = kde_bg(x_eval)
+            if not normalize:
+                density_bg = density_bg * len(mjj_background)
+            ax.fill_between(x_eval, density_bg, alpha=1, color='#fed9a6', 
+                            label='background', linewidth=1, edgecolor='#e6ab02')
     
     # Case 2: Separate files for background and signal
     else:
-        # Plot background distribution
-        if background_file is not None:
-            mjj_background, _ = load_dijet_mass_from_h5(background_file, n_jets=n_jets)
-            if len(mjj_background) > 0:
-                kde_bg = gaussian_kde(mjj_background, bw_method=bandwidth / mjj_background.std())
-                density_bg = kde_bg(x_eval)
-                if not normalize:
-                    density_bg = density_bg * len(mjj_background)
-                ax.fill_between(x_eval, density_bg, alpha=0.7, color='cyan', 
-                                label='background', linewidth=2, edgecolor='darkcyan')
-        
-        # Plot signal distribution
+        # Plot signal distribution first
         if signal_file is not None:
             mjj_signal, _ = load_dijet_mass_from_h5(signal_file, n_jets=n_jets)
             if len(mjj_signal) > 0:
@@ -167,34 +156,48 @@ def plot_dijet_mass_distribution(
                 density_sig = kde_sig(x_eval)
                 if not normalize:
                     density_sig = density_sig * len(mjj_signal)
-                ax.fill_between(x_eval, density_sig, alpha=0.7, color='darkred',
-                                label='signal', linewidth=2, edgecolor='maroon')
+                ax.fill_between(x_eval, density_sig, alpha=1, color='#fbb4ae',
+                                label='signal', linewidth=1, edgecolor='#D6938A')
+        
+        # Plot background distribution on top
+        if background_file is not None:
+            mjj_background, _ = load_dijet_mass_from_h5(background_file, n_jets=n_jets)
+            if len(mjj_background) > 0:
+                kde_bg = gaussian_kde(mjj_background, bw_method=bandwidth / mjj_background.std())
+                density_bg = kde_bg(x_eval)
+                if not normalize:
+                    density_bg = density_bg * len(mjj_background)
+                ax.fill_between(x_eval, density_bg, alpha=1, color='#fed9a6', 
+                                label='background', linewidth=1, edgecolor='#e6ab02')
     
     # Formatting
-    ax.set_xlabel(r'$M_{JJ}$ (GeV)', fontsize=14)
+    ax.set_xlabel(r'$M_{JJ}$ (GeV)', fontsize=15)
     ylabel = 'Counts' if not normalize else 'Density'
-    ax.set_ylabel(ylabel, fontsize=14)
-    ax.set_title('Dijet invariant mass', fontsize=16)
+    ax.set_ylabel(ylabel, fontsize=15)
     ax.set_xlim(xlim)
     if ylim is not None:
         ax.set_ylim(ylim)
+    else:
+        # Ensure y-axis starts from 0
+        current_ylim = ax.get_ylim()
+        ax.set_ylim(0, current_ylim[1])
     
     # Add background region markers if requested (plot first so signal region is on top)
     if show_background_region:
         ymin, ymax = ax.get_ylim()
-        ax.axvline(background_region[0], color='blue', linestyle='--', linewidth=2, alpha=0.5, zorder=2)
-        ax.axvline(background_region[1], color='blue', linestyle='--', linewidth=2, alpha=0.5, zorder=2)
-        # Add shaded regions for side bands
-        ax.axvspan(xlim[0], background_region[0], alpha=0.03, color='blue', zorder=1)
-        ax.axvspan(background_region[1], xlim[1], alpha=0.03, color='blue', zorder=1)
+        ax.axvline(background_region[0], color='#1f78b4', linestyle='--', linewidth=1, alpha=1, zorder=2)
+        ax.axvline(background_region[1], color='#1f78b4', linestyle='--', linewidth=1, alpha=1, zorder=2)
+        # Add shaded regions for side bands: [2900, 3300] and [3700, 4100]
+        ax.axvspan(2900, 3300, alpha=0.1, color='#1f78b4', zorder=1)
+        ax.axvspan(3700, 4100, alpha=0.1, color='#1f78b4', zorder=1)
     
     # Add signal region markers if requested (plot on top)
     if show_signal_region:
         ymin, ymax = ax.get_ylim()
-        ax.axvline(signal_region[0], color='blue', linestyle='--', linewidth=2, alpha=0.9, zorder=3)
-        ax.axvline(signal_region[1], color='blue', linestyle='--', linewidth=2, alpha=0.9, zorder=3)
+        ax.axvline(signal_region[0], color='#1f78b4', linestyle='--', linewidth=1, alpha=1, zorder=3)
+        ax.axvline(signal_region[1], color='#1f78b4', linestyle='--', linewidth=1, alpha=1, zorder=3)
         # Optionally add shaded region
-        ax.axvspan(signal_region[0], signal_region[1], alpha=0.15, color='blue', label='signal region', zorder=2)
+        ax.axvspan(signal_region[0], signal_region[1], alpha=0.15, color='#1f78b4', label='signal region', zorder=2)
     
     if show_background_region:
         # Add background region to legend
@@ -202,22 +205,45 @@ def plot_dijet_mass_distribution(
         legend_elements = ax.get_legend_handles_labels()
         if legend_elements[0]:  # If there are existing legend items
             handles, labels = legend_elements
-            handles.append(Patch(facecolor='blue', alpha=0.03, label='side bands'))
+            handles.append(Patch(facecolor='#1f78b4', alpha=0.1, label='side bands'))
             labels.append('side bands')
-            ax.legend(handles=handles, labels=labels, fontsize=12, loc='upper right')
+            ax.legend(handles=handles, labels=labels, fontsize=15, loc='upper right', framealpha=0.9)
         else:
-            ax.legend(fontsize=12, loc='upper right')
+            ax.legend(fontsize=15, loc='upper right', framealpha=0.9)
     else:
-        ax.legend(fontsize=12, loc='upper right')
-    ax.grid(True, alpha=0.3)
-    ax.tick_params(labelsize=12)
+        ax.legend(fontsize=15, loc='upper right', framealpha=0.9)
+    ax.tick_params(axis='both', which='major', labelsize=15)
+    ax.tick_params(axis='both', which='minor', labelsize=15)
+    ax.grid(True, which='major', alpha=0.3, linewidth=0.8)
+    ax.grid(True, which='minor', alpha=0.15, linewidth=0.5)
+    ax.minorticks_on()
     
     plt.tight_layout()
     
     # Save if requested
     if save_path is not None:
-        fig.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Figure saved to {save_path}")
+        # Save both PNG and PDF formats
+        save_path_obj = Path(save_path)
+        if save_path_obj.suffix:  # Has extension
+            # Save with provided extension
+            fig.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"Figure saved to {save_path}")
+            # Also save in other format
+            if save_path_obj.suffix.lower() == '.png':
+                pdf_path = save_path_obj.with_suffix('.pdf')
+                fig.savefig(pdf_path, bbox_inches='tight')
+                print(f"Figure saved to {pdf_path}")
+            elif save_path_obj.suffix.lower() == '.pdf':
+                png_path = save_path_obj.with_suffix('.png')
+                fig.savefig(png_path, dpi=300, bbox_inches='tight')
+                print(f"Figure saved to {png_path}")
+        else:  # No extension, save both
+            png_path = str(save_path_obj) + '.png'
+            pdf_path = str(save_path_obj) + '.pdf'
+            fig.savefig(png_path, dpi=300, bbox_inches='tight')
+            fig.savefig(pdf_path, bbox_inches='tight')
+            print(f"Figure saved to {png_path}")
+            print(f"Figure saved to {pdf_path}")
     
     # Show if requested
     if show:
@@ -284,23 +310,48 @@ def plot_dijet_mass_comparison(
         if len(mjj) > 0:
             kde = gaussian_kde(mjj, bw_method=bandwidth / mjj.std())
             density = kde(x_eval)
-            ax.plot(x_eval, density, label=label, linewidth=2, color=color, alpha=0.8)
+            ax.plot(x_eval, density, label=label, linewidth=1, color=color, alpha=0.8)
     
     # Formatting
-    ax.set_xlabel(r'$M_{JJ}$ (GeV)', fontsize=14)
-    ax.set_ylabel('Density', fontsize=14)
-    ax.set_title('Dijet invariant mass comparison', fontsize=16)
+    ax.set_xlabel(r'$M_{JJ}$ (GeV)', fontsize=15)
+    ax.set_ylabel('Density', fontsize=15)
     ax.set_xlim(xlim)
-    ax.legend(fontsize=12, loc='upper right')
-    ax.grid(True, alpha=0.3)
-    ax.tick_params(labelsize=12)
+    # Ensure y-axis starts from 0
+    current_ylim = ax.get_ylim()
+    ax.set_ylim(0, current_ylim[1])
+    ax.legend(fontsize=15, loc='upper right', framealpha=0.9)
+    ax.tick_params(axis='both', which='major', labelsize=15)
+    ax.tick_params(axis='both', which='minor', labelsize=15)
+    ax.grid(True, which='major', alpha=0.3, linewidth=0.8)
+    ax.grid(True, which='minor', alpha=0.15, linewidth=0.5)
+    ax.minorticks_on()
     
     plt.tight_layout()
     
     # Save if requested
     if save_path is not None:
-        fig.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Figure saved to {save_path}")
+        # Save both PNG and PDF formats
+        save_path_obj = Path(save_path)
+        if save_path_obj.suffix:  # Has extension
+            # Save with provided extension
+            fig.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"Figure saved to {save_path}")
+            # Also save in other format
+            if save_path_obj.suffix.lower() == '.png':
+                pdf_path = save_path_obj.with_suffix('.pdf')
+                fig.savefig(pdf_path, bbox_inches='tight')
+                print(f"Figure saved to {pdf_path}")
+            elif save_path_obj.suffix.lower() == '.pdf':
+                png_path = save_path_obj.with_suffix('.png')
+                fig.savefig(png_path, dpi=300, bbox_inches='tight')
+                print(f"Figure saved to {png_path}")
+        else:  # No extension, save both
+            png_path = str(save_path_obj) + '.png'
+            pdf_path = str(save_path_obj) + '.pdf'
+            fig.savefig(png_path, dpi=300, bbox_inches='tight')
+            fig.savefig(pdf_path, bbox_inches='tight')
+            print(f"Figure saved to {png_path}")
+            print(f"Figure saved to {pdf_path}")
     
     # Show if requested
     if show:

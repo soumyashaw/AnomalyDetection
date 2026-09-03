@@ -658,7 +658,6 @@ def set_backbone_requires_grad(model, requires_grad=True):
 def main():
     parser = argparse.ArgumentParser(description="OmniJet-alpha Anomaly Detection Training Script")
     parser.add_argument("--dataset_path", default=str(os.getenv("DATASET_PATH")), type=str, help="Path to the LHCO dataset")
-    parser.add_argument("--gpu_id", type=int, default=int(os.getenv("GPU_ID")), help="GPU ID to use for computation")
     parser.add_argument("--seed", type=int, default=int(os.getenv("SEED")), help="Random seed for reproducibility")
     parser.add_argument("--jet_name", type=str, default=str(os.getenv("JET_NAME")), choices=["jet1", "jet2", "both"], help="Name of the jet to use from the dataset")
     parser.add_argument("--merge_strategy", type=str, default=str(os.getenv("MERGE_STRATEGY")), choices=["concat", "average", "weighted_sum", "attention"], help="Merge strategy for dijet model")
@@ -666,7 +665,7 @@ def main():
     parser.add_argument("--max_steps", type=int, default=int(os.getenv("MAX_STEPS")), help="Maximum number of training steps")
     parser.add_argument("--learning_rate", type=float, default=float(os.getenv("LEARNING_RATE")), help="Learning rate")
     parser.add_argument("--train_val_split", type=float, default=float(os.getenv("TRAIN_VAL_SPLIT")), help="Train/validation split ratio")
-    parser.add_argument("--n_jets_train", type=list, default=list(map(int,os.getenv("N_JETS_TRAIN_CUSTOM_AACHEN").strip('[]').split(','))), help="Number of jets per class for training [signal, supp, background]")
+    parser.add_argument("--n_jets_train", type=int, nargs=3, default=list(map(int,os.getenv("N_JETS_TRAIN_CUSTOM_AACHEN").strip('[]').split(','))), metavar=("SIGNAL", "SUPP_BACKGROUND", "BACKGROUND"), help="Number of jets per class for training")
     parser.add_argument("--embedding_dim", type=int, default=int(os.getenv("EMBEDDING_DIM")), help="Embedding dimension")
     parser.add_argument("--naming_identifier", type=str, default="", help="Optional identifier to add to the run name for easier tracking")
     parser.add_argument("--log_dir", type=str, default=str(os.getenv("LOG_DIR_AACHEN")), help="Directory for experiment logs")
@@ -700,7 +699,7 @@ def main():
     # Set random seed for reproducibility
     L.seed_everything(args.seed)
 
-    device = torch.device(f'cuda:{args.gpu_id}' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
     # ============================================================
@@ -715,7 +714,8 @@ def main():
 
     signal_path = os.path.join(args.dataset_path, "sn_25k_SR_train.h5")
     supp_background_path = os.path.join(args.dataset_path, "bg_100k_SR_supp.h5")
-    background_path = os.path.join(args.dataset_path, "bg_200k_SR_train.h5")
+    # background_path = os.path.join(args.dataset_path, "bg_200k_SR_train.h5")
+    background_path = os.path.join(args.dataset_path, "bg_600k_SR_train.h5")
     
     h5_files_all = [signal_path, supp_background_path, background_path]
     print("n_jets_train:", args.n_jets_train)
@@ -965,7 +965,7 @@ def main():
     # Log system configuration
     system_config = {
         "device": str(device),
-        "gpu_id": args.gpu_id,
+        "cuda_visible_devices": os.getenv("CUDA_VISIBLE_DEVICES"),
         "random_seed": args.seed,
         "timestamp_start": datetime.now().isoformat(),
     }
@@ -1052,13 +1052,12 @@ def main():
 
     # Create trainer
     print("Starting training...")
-    # Ensure Lightning uses the GPU requested via --gpu_id.
-    # Use explicit accelerator and devices so PL selects the correct device
-    # (accelerator="auto", devices=1 will pick the first visible GPU i.e. GPU 0).
+    # HTCondor exposes only the assigned GPU through CUDA_VISIBLE_DEVICES.
+    # Lightning therefore selects that visible device automatically.
     trainer = L.Trainer(
         max_steps=args.max_steps,
         accelerator="gpu",
-        devices=[args.gpu_id],
+        devices=1,
         logger=loggers if loggers else False,
         callbacks=[checkpoint_loss_callback, checkpoint_argos_callback, auc_callback, argos_callback],
         log_every_n_steps=20,

@@ -16,7 +16,7 @@ apptainer exec --nv "$IMG" bash -lc '
     source /opt/conda/bin/activate
     cd "$HOME/AnomalyDetection"
 
-    python -m src.train.train_anchor_aachen --batch_size 1024 --learning_rate 2e-4 --naming_identifier anchor_baseline_5_unsup_b1024 --guaranteed_signal_per_batch 5 --injection_probability 1.0 --use_wandb
+    python -m src.train.train_anchor_aachen --batch_size 64 --learning_rate 1e-4 --naming_identifier anchor_test --guaranteed_signal_per_batch 1 --injection_probability 1.0 --use_wandb
 '
 echo "Job finished."
 # python -m src.train.train_anchor_aachen --batch_size 64 --learning_rate 1e-4 --naming_identifier anchor_baseline_5_unsup --guaranteed_signal_per_batch 5 --injection_probability 1.0 --use_wandb

@@ -973,6 +973,25 @@ def load_pretrained_backbone(model, ckpt_path, strict=False):
     print("  - Input/output projections: may be randomly initialized due to feature dimension differences")
     print("  - Classification head: randomly initialized (2 classes for LHCO vs 10 classes in checkpoint)")
 
+def set_backbone_requires_grad(model, requires_grad=True):
+    """Set requires_grad for all backbone parameters.
+    
+    Parameters
+    ----------
+    model : BackboneAachenClassificationLightning
+        The Lightning module containing the backbone
+    requires_grad : bool
+        Whether to compute gradients for backbone parameters (default: True)
+    """
+    num_params = 0
+    for param in model.backbone.parameters():
+        param.requires_grad = requires_grad
+        num_params += param.numel()
+    
+    status = "trainable" if requires_grad else "frozen"
+    print(f"Backbone set to {status}: {num_params:,} parameters")
+    return num_params
+
 def main():
     parser = argparse.ArgumentParser(description="OmniJet-alpha Anomaly Detection Training Script")
     parser.add_argument("--dataset_path", default=str(os.getenv("DATASET_PATH")), type=str, help="Path to the LHCO dataset")
@@ -992,6 +1011,8 @@ def main():
     parser.add_argument("--pretrained_ckpt", type=str, help="Path to pre-trained checkpoint")
     parser.add_argument("--load_pretrained", action="store_true", help="Load pre-trained backbone weights from checkpoint")
     parser.add_argument("--use_class_weights", type=lambda x: x.lower() == 'true', default=True, help="Use automatic class weighting for imbalanced data (default: True)")
+    parser.add_argument("--freeze_backbone", action="store_true", help="Freeze backbone weights during training (no gradient updates)")
+    parser.add_argument("--update_backbone", action="store_true", default=True, help="Update backbone weights during training (default: True, set to False with --freeze_backbone)")
     
     # Diagnostic ablation study: guaranteed signal injection
     parser.add_argument("--guaranteed_signal_per_batch", type=int, default=0, 
@@ -1096,7 +1117,6 @@ def main():
         print(f"Expected label 1 composition per batch:")
         print(f"  - True signal: {args.guaranteed_signal_per_batch} jets")
         print(f"  - Fake signal (supp BG): {args.batch_size // 2 - args.guaranteed_signal_per_batch} jets")
-        print(f"This is designed to diagnose gradient flow issues at low signal injection levels.")
         print(f"{'='*80}\n")
         
         train_loader, val_loader = create_guaranteed_signal_dataloaders(
@@ -1284,6 +1304,14 @@ def main():
         load_pretrained_backbone(model, args.pretrained_ckpt)
         print("Successfully loaded pre-trained backbone weights!")
 
+    # Freeze or update backbone based on arguments
+    if args.freeze_backbone:
+        set_backbone_requires_grad(model, requires_grad=False)
+        print("Backbone frozen - only classification head will be trained")
+    else:
+        set_backbone_requires_grad(model, requires_grad=True)
+        print("Backbone trainable - all parameters will be updated during training")
+
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model created with {num_params:,} parameters")
     
@@ -1349,14 +1377,14 @@ def main():
     print(f"Configuration saved to: {exp_logger.run_dir / 'config.json'}")
     
     # # Setup callbacks
-    # checkpoint_callback = ModelCheckpoint(
-    #     dirpath=exp_logger.get_checkpoint_dir(),
-    #     filename="epoch_{epoch:02d}_{val_loss:.4f}",
-    #     monitor="val_loss",
-    #     mode="min",
-    #     save_top_k=3,
-    #     save_last=False,
-    # )
+    checkpoint_callback_loss = ModelCheckpoint(
+        dirpath=exp_logger.get_checkpoint_dir(),
+        filename="epoch_{epoch:02d}_{val_loss:.4f}",
+        monitor="val_loss",
+        mode="min",
+        save_top_k=1,
+        save_last=False,
+    )
 
     # Alternatively, monitor AUC instead of loss
     # checkpoint_callback = ModelCheckpoint(
@@ -1364,12 +1392,12 @@ def main():
     #     filename="epoch_{epoch:02d}_{val_loss:.4f}",
     #     monitor="val_loss",
     #     mode="min",
-    #     save_top_k=3,
+    #     save_top_k=1,
     #     save_last=False,
     # )
 
     # Or using ARGOS metric
-    checkpoint_callback = ModelCheckpoint(
+    checkpoint_callback_argos = ModelCheckpoint(
         dirpath=exp_logger.get_checkpoint_dir(),
         filename="{epoch:02d}_{val_argos:.4f}",
         monitor="val_argos",
@@ -1428,7 +1456,7 @@ def main():
         accelerator="gpu",
         devices=[args.gpu_id],
         logger=loggers if loggers else False,
-        callbacks=[checkpoint_callback, auc_callback, argos_callback], #early_stop_callback],
+        callbacks=[checkpoint_callback_loss, checkpoint_callback_argos, auc_callback, argos_callback], #early_stop_callback],
         log_every_n_steps=20,
         gradient_clip_val=1,
         precision="32",
@@ -1446,12 +1474,12 @@ def main():
         )
         
         # Log final results
-        exp_logger.log_final_results(trainer, checkpoint_callback)
+        exp_logger.log_final_results(trainer, checkpoint_callback_argos)
         
         print("\n" + "=" * 80)
         print("Training complete!")
-        print(f"Best checkpoint: {checkpoint_callback.best_model_path}")
-        print(f"Best validation loss: {checkpoint_callback.best_model_score:.4f}")
+        print(f"Best checkpoint: {checkpoint_callback_argos.best_model_path}")
+        print(f"Best validation ARGOS: {checkpoint_callback_argos.best_model_score:.4f}")
         print(f"Results saved to: {exp_logger.run_dir}")
         if args.use_wandb:
             print(f"W&B run: {wandb.run.url}")

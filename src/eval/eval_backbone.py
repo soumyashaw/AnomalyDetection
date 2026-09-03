@@ -624,21 +624,28 @@ class EmbeddingExtractor:
         sig_mask = labels == 1
         
         plt.scatter(embeddings_tsne[bg_mask, 0], embeddings_tsne[bg_mask, 1], 
-                   c='#FA8072', label='Background', alpha=0.6, s=5)
+                   c='#D6938A', label='Background', alpha=0.6, s=5)
         plt.scatter(embeddings_tsne[sig_mask, 0], embeddings_tsne[sig_mask, 1], 
-                   c='#4FFFB0', label='Signal', alpha=0.6, s=5)
+                   c='#1b9e77', label='Signal', alpha=0.6, s=5)
         
-        plt.xlabel('t-SNE 1', fontsize=12)
-        plt.ylabel('t-SNE 2', fontsize=12)
-        plt.title(f'Jet Embeddings (t-SNE)', fontsize=14)
-        plt.legend(fontsize=11)
-        plt.grid(True, alpha=0.3)
+        ax = plt.gca()
+        ax.set_xlabel('t-SNE 1', fontsize=15)
+        ax.set_ylabel('t-SNE 2', fontsize=15)
+        ax.tick_params(axis='both', which='major', labelsize=15)
+        ax.tick_params(axis='both', which='minor', labelsize=15)
+        ax.grid(True, which='major', alpha=0.3, linewidth=0.8)
+        ax.grid(True, which='minor', alpha=0.15, linewidth=0.5)
+        ax.minorticks_on()
+        ax.legend(fontsize=15, framealpha=0.9)
         plt.tight_layout()
         
-        save_path = self.output_dir / 'embeddings_tsne.png'
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        save_path_png = self.output_dir / 'embeddings_tsne.png'
+        save_path_pdf = self.output_dir / 'embeddings_tsne.pdf'
+        plt.savefig(save_path_png, dpi=300, bbox_inches='tight')
+        plt.savefig(save_path_pdf, bbox_inches='tight')
         plt.close()
-        print(f"Saved: {save_path}")
+        print(f"Saved: {save_path_png}")
+        print(f"Saved: {save_path_pdf}")
     
     def plot_umap(self, embeddings, labels, n_neighbors=15, min_dist=0.1):
         """Plot UMAP visualization."""
@@ -659,21 +666,28 @@ class EmbeddingExtractor:
         sig_mask = labels == 1
         
         plt.scatter(embeddings_umap[bg_mask, 0], embeddings_umap[bg_mask, 1], 
-                   c='#FA8072', label='Background', alpha=0.6, s=5)
+                   c='#D6938A', label='Background', alpha=0.6, s=5)
         plt.scatter(embeddings_umap[sig_mask, 0], embeddings_umap[sig_mask, 1], 
-                   c='#4FFFB0', label='Signal', alpha=0.6, s=5)
+                   c='#1b9e77', label='Signal', alpha=0.6, s=5)
         
-        plt.xlabel('UMAP 1', fontsize=12)
-        plt.ylabel('UMAP 2', fontsize=12)
-        plt.title(f'Jet Embeddings (UMAP)', fontsize=14)
-        plt.legend(fontsize=11)
-        plt.grid(True, alpha=0.3)
+        ax = plt.gca()
+        ax.set_xlabel('UMAP 1', fontsize=15)
+        ax.set_ylabel('UMAP 2', fontsize=15)
+        ax.tick_params(axis='both', which='major', labelsize=15)
+        ax.tick_params(axis='both', which='minor', labelsize=15)
+        ax.grid(True, which='major', alpha=0.3, linewidth=0.8)
+        ax.grid(True, which='minor', alpha=0.15, linewidth=0.5)
+        ax.minorticks_on()
+        ax.legend(fontsize=15, framealpha=0.9)
         plt.tight_layout()
         
-        save_path = self.output_dir / 'embeddings_umap.png'
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        save_path_png = self.output_dir / 'embeddings_umap.png'
+        save_path_pdf = self.output_dir / 'embeddings_umap.pdf'
+        plt.savefig(save_path_png, dpi=300, bbox_inches='tight')
+        plt.savefig(save_path_pdf, bbox_inches='tight')
         plt.close()
-        print(f"Saved: {save_path}")
+        print(f"Saved: {save_path_png}")
+        print(f"Saved: {save_path_pdf}")
     
     def visualize(self, test_loader):
         """Extract and visualize embeddings."""

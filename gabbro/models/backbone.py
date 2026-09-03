@@ -1476,14 +1476,17 @@ class BackboneClassificationLightning(L.LightningModule):
             X[:, 0] = 0.0
         mask = batch["part_mask"]
         jet_labels = batch["jet_type_labels"]
-        # one-hot encode the labels
+        # Forward pass
         logits = self.forward(X, mask, x_jet=X_jet)
-        labels = F.one_hot(jet_labels.squeeze(), num_classes=self.head.n_out_nodes).float()
-        loss = self.criterion(logits, labels)
+        # CrossEntropyLoss expects class indices (not one-hot) for proper class weight application
+        labels_idx = jet_labels.squeeze().long()
+        loss = self.criterion(logits, labels_idx)
+        # Return one-hot labels for metrics calculation
+        labels_onehot = F.one_hot(labels_idx, num_classes=self.head.n_out_nodes).float()
         return {
             "loss": loss,
             "logits": logits,
-            "targets": labels,
+            "targets": labels_onehot,
         }
 
     def _shared_step(self, batch, stage: str) -> torch.Tensor:
@@ -2257,14 +2260,17 @@ class BackboneDijetClassificationLightning(L.LightningModule):
         mask1 = batch["part_mask"]
         mask2 = batch["part_mask_jet2"]
         jet_labels = batch["jet_type_labels"]
-        # one-hot encode the labels
+        # Forward pass
         logits = self.forward(X1, mask1, X2, mask2, x_jet=X_jet)
-        labels = F.one_hot(jet_labels.squeeze(), num_classes=self.head.n_out_nodes).float()
-        loss = self.criterion(logits, labels)
+        # CrossEntropyLoss expects class indices (not one-hot) for proper class weight application
+        labels_idx = jet_labels.squeeze().long()
+        loss = self.criterion(logits, labels_idx)
+        # Return one-hot labels for metrics calculation
+        labels_onehot = F.one_hot(labels_idx, num_classes=self.head.n_out_nodes).float()
         return {
             "loss": loss,
             "logits": logits,
-            "targets": labels,
+            "targets": labels_onehot,
         }
 
     def _shared_step(self, batch, stage: str) -> torch.Tensor:

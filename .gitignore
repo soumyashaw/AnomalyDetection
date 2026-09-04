@@ -91,15 +91,3 @@ yarn-error.log*
 *.tar
 *.tar.gz
 *.rar
-
-# =========================
-# Generated ML artifacts
-# =========================
-**/checkpoints/
-*.ckpt
-**/tensorboard/
-**/wandb/
-
-# Generated evaluation payloads under the root results tree
-/results/**/*.npz
-/results/**/*.png

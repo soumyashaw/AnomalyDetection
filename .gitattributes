@@ -1,0 +1,4 @@
+aachen_head_expts/paper_results/non_optim/run_weak_600_350k_scratch_aachen_seed42_20260817_225500/wandb/run-20260817_235003-634rk8zb/logs/debug-internal.log filter=lfs diff=lfs merge=lfs -text
+aachen_head_expts/paper_results/non_optim/run_weak_300_350k_scratch_aachen_seed42_20260818_100655/wandb/run-20260818_114746-7yvy9qnm/logs/debug-internal.log filter=lfs diff=lfs merge=lfs -text
+aachen_head_expts/paper_results/non_optim/run_weak_300_350k_scratch_aachen_seed42_20260818_100655/wandb/run-20260818_114746-7yvy9qnm/run-7yvy9qnm.wandb filter=lfs diff=lfs merge=lfs -text
+aachen_head_expts/paper_results/non_optim/run_weak_600_350k_scratch_aachen_seed42_20260817_225500/wandb/run-20260817_235003-634rk8zb/run-634rk8zb.wandb filter=lfs diff=lfs merge=lfs -text

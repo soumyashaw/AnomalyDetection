@@ -1,0 +1,23 @@
+{
+    "best_model_path": "/.automount/home/home__home3/institut_thp/soshaw/AnomalyDetection/aachen_head_expts/run_weak_100_350k_pretrain_class10M_freeze_aachen_seed109_20260906_161807/checkpoints/epoch=13_val_argos=0.0134.ckpt",
+    "best_model_score": 0.013363947160542011,
+    "current_epoch": 64,
+    "global_step": 315072,
+    "training_completed": true,
+    "timestamp_end": "2026-09-06T20:24:46.094590",
+    "final_metrics": {
+        "train_loss": 0.8520419001579285,
+        "train_loss_step": 0.8917911648750305,
+        "train_acc": 0.7764877676963806,
+        "train_acc_step": 0.7580645084381104,
+        "val_loss": 0.8596956729888916,
+        "val_loss_epoch": 0.8596956729888916,
+        "val_acc": 0.7765681743621826,
+        "val_acc_epoch": 0.7765681743621826,
+        "val_auc": 0.4874887466430664,
+        "val_argos": 0.0014714584685862064,
+        "train_loss_epoch": 0.8520419001579285,
+        "train_acc_epoch": 0.7764877676963806,
+        "epoch_train_duration_minutes": 3.1616854667663574
+    }
+}

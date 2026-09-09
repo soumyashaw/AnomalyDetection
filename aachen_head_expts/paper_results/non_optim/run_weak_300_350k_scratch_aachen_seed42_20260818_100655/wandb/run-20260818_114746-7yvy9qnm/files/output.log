@@ -1,0 +1,9 @@
+  Run URL: https://wandb.ai/oblivion/anomaly-detection-lhco/runs/7yvy9qnm
+================================================================================
+Starting training...
+================================================================================
+Training complete!
+Best checkpoint: /.automount/home/home__home3/institut_thp/soshaw/AnomalyDetection/aachen_head_expts/run_weak_300_350k_scratch_aachen_seed42_20260818_100655/checkpoints/epoch=157_val_argos=0.0148.ckpt
+Best validation ARGOS: 0.0148
+Results saved to: aachen_head_expts/run_weak_300_350k_scratch_aachen_seed42_20260818_100655
+W&B run: https://wandb.ai/oblivion/anomaly-detection-lhco/runs/7yvy9qnm

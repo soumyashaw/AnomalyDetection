@@ -1,0 +1,58 @@
+{
+    "checkpoint_path": "aachen_head_expts/run_optim_weak_2k_350k_pretrain_class10M_freeze_aachen_seed256_20260902_164554/checkpoints/epoch=126_val_argos=1.8900.ckpt",
+    "evaluation_timestamp": "20260905_122120",
+    "metrics": {
+        "roc_auc": 0.8971013908000001,
+        "average_precision": 0.9316062403520777,
+        "accuracy": 0.86154,
+        "sensitivity": 0.81226,
+        "specificity": 0.91082,
+        "threshold_used": 0.5,
+        "optimal_threshold": 0.5802389979362488,
+        "confusion_matrix": [
+            [
+                45541,
+                4459
+            ],
+            [
+                9387,
+                40613
+            ]
+        ],
+        "classification_report": {
+            "Background": {
+                "precision": 0.8291035537430819,
+                "recall": 0.91082,
+                "f1-score": 0.8680428484293992,
+                "support": 50000.0
+            },
+            "Signal": {
+                "precision": 0.9010694000709976,
+                "recall": 0.81226,
+                "f1-score": 0.8543630090878492,
+                "support": 50000.0
+            },
+            "accuracy": 0.86154,
+            "macro avg": {
+                "precision": 0.8650864769070397,
+                "recall": 0.86154,
+                "f1-score": 0.8612029287586243,
+                "support": 100000.0
+            },
+            "weighted avg": {
+                "precision": 0.8650864769070398,
+                "recall": 0.86154,
+                "f1-score": 0.8612029287586241,
+                "support": 100000.0
+            }
+        },
+        "n_samples": 100000,
+        "n_signal": 50000,
+        "n_background": 50000,
+        "r30": "inf",
+        "r30_tpr": 0.3,
+        "r30_status": "fpr_zero",
+        "max_sic": 94.83611506172107
+    },
+    "device": "cuda:0"
+}

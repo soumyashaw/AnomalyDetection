@@ -1,0 +1,23 @@
+{
+    "best_model_path": "/.automount/home/home__home3/institut_thp/soshaw/AnomalyDetection/aachen_head_expts/run_optim_weak_700_350k_scratch_aachen_seed2_20260920_001332/checkpoints/epoch=231_val_argos=0.3287.ckpt",
+    "best_model_score": 0.32873064279556274,
+    "current_epoch": 300,
+    "global_step": 92700,
+    "training_completed": true,
+    "timestamp_end": "2026-09-20T20:58:52.317602",
+    "final_metrics": {
+        "train_loss": 0.8509513139724731,
+        "train_loss_step": 0.9018939137458801,
+        "train_acc": 0.7763669490814209,
+        "train_acc_step": 0.7448979616165161,
+        "val_loss": 0.8583323955535889,
+        "val_loss_epoch": 0.8583323955535889,
+        "val_acc": 0.7715997099876404,
+        "val_acc_epoch": 0.7715997099876404,
+        "val_auc": 0.49491122364997864,
+        "val_argos": 0.1474921554327011,
+        "train_loss_epoch": 0.8509513139724731,
+        "train_acc_epoch": 0.7763669490814209,
+        "epoch_train_duration_minutes": 4.021858215332031
+    }
+}

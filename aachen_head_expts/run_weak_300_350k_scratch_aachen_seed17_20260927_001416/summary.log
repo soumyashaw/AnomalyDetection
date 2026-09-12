@@ -1,0 +1,19 @@
+Experiment: run_weak_300_350k_scratch_aachen_seed17_20260927_001416
+================================================================================
+
+CONFIGURATION:
+--------------------------------------------------------------------------------
+data: {'dataset_path': '/.automount/net_rw/net__data_ttk/soshaw', 'signal_file': '/.automount/net_rw/net__data_ttk/soshaw/sn_25k_SR_train.h5', 'supp_background_file': '/.automount/net_rw/net__data_ttk/soshaw/bg_100k_SR_supp.h5', 'background_file': '/.automount/net_rw/net__data_ttk/soshaw/bg_600k_SR_train.h5', 'n_jets_train': [300, 100000, 350000], 'batch_size': 64, 'max_sequence_len': 128, 'mom4_format': 'epxpypz', 'train_val_split': 0.7, 'features': ['part_pt', 'part_etarel', 'part_phirel'], 'feature_preprocessing': {'part_pt': {'multiply_by': 1, 'subtract_by': 1.8, 'func': 'signed_log', 'inv_func': 'signed_exp'}, 'part_etarel': {'multiply_by': 3}, 'part_phirel': {'multiply_by': 3}}, 'shuffle_train': True, 'jet_name': 'both'}
+model: {'architecture': 'BackboneAachenClassificationLightning', 'class_head_type': 'aachen', 'merge_strategy': 'concat', 'config_source': 'args', 'use_continuous_input': True, 'num_parameters': 1887873, 'embedding_dim': 128, 'n_transformer_blocks': 8, 'num_attention_heads': 8, 'max_sequence_len': 256, 'jet_features_input_dim': 0, 'n_output_classes': 2, 'pretrained_checkpoint': None, 'load_pretrained': False, 'model_kwargs': {'embedding_dim': 128, 'max_sequence_len': 256, 'n_out_nodes': 2, 'embed_cfg': {'type': 'continuous_project_add', 'intermediate_dim': None}, 'transformer_cfg': {'dim': 128, 'n_blocks': 8, 'norm_after_blocks': True, 'residual_cfg': {'gate_type': 'local', 'init_value': 1}, 'attn_cfg': {'num_heads': 8, 'dropout_rate': 0.1, 'norm_before': True, 'norm_after': False}, 'mlp_cfg': {'dropout_rate': 0.0, 'norm_before': True, 'expansion_factor': 4, 'activation': 'GELU'}}, 'class_head_hidden_dim': 128, 'class_head_num_heads': 2, 'class_head_num_CA_blocks': 2, 'class_head_num_SA_blocks': 0, 'class_head_dropout_rate': 0.1, 'jet_features_input_dim': 0, 'apply_causal_mask': False, 'zero_padded_start_particle': False, 'class_weights': [0.6432857142857142, 2.244765702891326]}}
+training: {'optimizer': 'AdamW', 'optimizer_params': {'lr': 0.0001, 'weight_decay': 0.01}, 'scheduler': 'ConstantLR', 'max_epochs': 300, 'gradient_clip_val': 1.0, 'precision': '32', 'early_stopping_patience': 15, 'early_stopping_monitor': 'val_argos', 'checkpoint_monitor': 'val_argos', 'checkpoint_mode': 'max', 'load_pretrained': False, 'pretrained_ckpt': None, 'use_class_weights': True, 'class_weights': [0.6432857142857142, 2.244765702891326]}
+system: {'device': 'cuda', 'cuda_visible_devices': '1', 'random_seed': 17, 'timestamp_start': '2026-09-27T01:12:55.411667'}
+
+RESULTS:
+--------------------------------------------------------------------------------
+best_model_path: /.automount/home/home__home3/institut_thp/soshaw/AnomalyDetection/aachen_head_expts/run_weak_300_350k_scratch_aachen_seed17_20260927_001416/checkpoints/epoch=95_val_argos=0.0134.ckpt
+best_model_score: 0.01337077934294939
+current_epoch: 246
+global_step: 1211796
+training_completed: True
+timestamp_end: 2026-09-28T08:18:45.263787
+final_metrics: {'train_loss': 0.8549863696098328, 'train_loss_step': 0.818680465221405, 'train_acc': 0.777326226234436, 'train_acc_step': 0.800000011920929, 'val_loss': 0.8552477359771729, 'val_loss_epoch': 0.8552477359771729, 'val_acc': 0.7771041393280029, 'val_acc_epoch': 0.7771041393280029, 'val_auc': 0.49921146035194397, 'val_argos': 0.004979011137038469, 'train_loss_epoch': 0.8549863696098328, 'train_acc_epoch': 0.777326226234436, 'epoch_train_duration_minutes': 7.5255608558654785}

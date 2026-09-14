@@ -713,10 +713,10 @@ def main():
         "part_phirel": {"multiply_by": 3}
     }
 
-    signal_path = os.path.join(args.dataset_path, "sn_25k_SR_train.h5")
-    supp_background_path = os.path.join(args.dataset_path, "bg_100k_SR_supp.h5")
+    signal_path = os.path.join(args.dataset_path, "sn_XtoYY_10k_SR_train.h5")
+    supp_background_path = os.path.join(args.dataset_path, "bg_120k_SR_supp.h5")
     # background_path = os.path.join(args.dataset_path, "bg_200k_SR_train.h5")
-    background_path = os.path.join(args.dataset_path, "bg_600k_SR_train.h5")
+    background_path = os.path.join(args.dataset_path, "bg_270k_SR_train.h5")
     
     h5_files_all = [signal_path, supp_background_path, background_path]
     print("n_jets_train:", args.n_jets_train)
@@ -1014,7 +1014,7 @@ def main():
     # Early stopping disabled
     early_stop_callback = EarlyStopping(
         monitor="val_argos",
-        patience=150,
+        patience=50,
         mode="max",
     )
 

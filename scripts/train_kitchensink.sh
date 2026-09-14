@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if (( $# != 21 )); then
-    echo "Expected 21 arguments from train_aachen.sub, received $#." >&2
+    echo "Expected 21 arguments from train_kitchensink.sub, received $#." >&2
     exit 2
 fi
 
@@ -83,6 +83,6 @@ if [[ "$use_hpc" == "true" ]]; then
 fi
 
 apptainer exec --nv --pwd "$project_dir" "$image" \
-    /opt/conda/bin/python -m src.train.train_custom_aachen "${train_args[@]}"
+    /opt/conda/bin/python -m src.train.train_kitchensink_aachen "${train_args[@]}"
 
 echo "Job finished."

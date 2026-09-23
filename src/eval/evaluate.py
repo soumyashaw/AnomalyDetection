@@ -906,7 +906,8 @@ def main():
     # Load test data
     # NOTE: Order must match training! Signal first, then background
     signal_path = os.path.join(args.dataset_path, "sn_50k_SR_test.h5")
-    background_path = os.path.join(args.dataset_path, "bg_200k_SR_test.h5")
+    # background_path = os.path.join(args.dataset_path, "bg_200k_SR_test.h5")
+    background_path = os.path.join(args.dataset_path, "KitchenSink/bg_340k_SR_test.h5") # temporary
     h5_files_test = [signal_path, background_path]
     
     # Determine jet_name based on model type

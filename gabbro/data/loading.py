@@ -889,9 +889,12 @@ def load_lhco_jets_from_h5(
         - "pxpypze": [px, py, pz, E] (energy last)
         - "ptphietam": [pt, phi, eta, mass]
         Default: "epxpypz"
-        Note: Only used when use_h5_features=False
+        Used to parse /<jet_name>/4mom in both feature paths. If the file has a
+        "mom4_format" attribute that differs from this value, a ValueError is raised.
     use_h5_features : bool, optional
         If True, use the precomputed features from /jet1/features dataset (recommended).
+        A ValueError is raised if the file has no precomputed features, so that files
+        with and without them are never silently mixed in one dataset.
         If False, derive features from 4-momentum (slower, may have numerical differences).
         Default: True
 
@@ -934,6 +937,25 @@ def load_lhco_jets_from_h5(
     batch_size = 10000
 
     with h5py.File(h5_filename, "r") as f:
+        # Refuse files whose stored 4-momentum layout differs from how they would be parsed
+        file_mom4_format = f.attrs.get("mom4_format")
+        if isinstance(file_mom4_format, bytes):
+            file_mom4_format = file_mom4_format.decode()
+        if file_mom4_format is not None and file_mom4_format != mom4_format:
+            raise ValueError(
+                f"{h5_filename} stores 4-momenta as mom4_format='{file_mom4_format}', "
+                f"but it would be parsed as mom4_format='{mom4_format}'. "
+                "Convert the file to the expected layout instead of loading it."
+            )
+        # Refuse to silently fall back to features derived from 4-momenta: if other files in the
+        # same dataset use precomputed features, the two code paths create artificial class differences
+        if use_h5_features and f"{jet_name}/features" not in f:
+            raise ValueError(
+                f"{h5_filename} has no precomputed '{jet_name}/features'. Convert it to the "
+                "precomputed-feature schema (e.g. src/data/convert_kitchensink_signal.py), or pass "
+                "use_h5_features=False for every file of the dataset."
+            )
+
         # Get total number of jets
         total_jets = f[f"{jet_name}/4mom"].shape[0]
         if n_jets is None:

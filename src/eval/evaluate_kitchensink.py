@@ -905,7 +905,8 @@ def main():
     
     # Load test data
     # NOTE: Order must match training! Signal first, then background
-    signal_path = os.path.join(args.dataset_path, "sn_XtoYY_20k_SR_test.h5")
+    # Converted copy in the background schema (see src/data/convert_kitchensink_signal.py)
+    signal_path = os.path.join(args.dataset_path, "sn_XtoYY_20k_SR_test_epxpypz.h5")
     background_path = os.path.join(args.dataset_path, "bg_340k_SR_test.h5")
     h5_files_test = [signal_path, background_path]
     

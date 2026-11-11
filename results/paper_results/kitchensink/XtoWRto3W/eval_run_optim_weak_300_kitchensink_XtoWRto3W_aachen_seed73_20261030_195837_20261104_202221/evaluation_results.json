@@ -1,0 +1,60 @@
+{
+    "checkpoint_path": "aachen_head_expts/run_optim_weak_300_kitchensink_XtoWRto3W_aachen_seed73_20261030_195837/checkpoints/epoch=29_val_argos=0.0908.ckpt",
+    "evaluation_timestamp": "20261104_202221",
+    "metrics": {
+        "roc_auc": 0.8364844733455883,
+        "average_precision": 0.47915963831077335,
+        "accuracy": 0.8874269662921348,
+        "sensitivity": 0.6196875,
+        "specificity": 0.9000264705882353,
+        "threshold_used": 0.5,
+        "optimal_threshold": 0.48693588376045227,
+        "confusion_matrix": [
+            [
+                306009,
+                33991
+            ],
+            [
+                6085,
+                9915
+            ]
+        ],
+        "classification_report": {
+            "Background": {
+                "precision": 0.9805026690676527,
+                "recall": 0.9000264705882353,
+                "f1-score": 0.9385426027535907,
+                "support": 340000.0
+            },
+            "Signal": {
+                "precision": 0.22582334988384276,
+                "recall": 0.6196875,
+                "f1-score": 0.3310185958000868,
+                "support": 16000.0
+            },
+            "accuracy": 0.8874269662921348,
+            "macro avg": {
+                "precision": 0.6031630094757477,
+                "recall": 0.7598569852941176,
+                "f1-score": 0.6347805992768387,
+                "support": 356000.0
+            },
+            "weighted avg": {
+                "precision": 0.9465844974189421,
+                "recall": 0.8874269662921348,
+                "f1-score": 0.9112381530028715,
+                "support": 356000.0
+            }
+        },
+        "n_samples": 356000,
+        "n_signal": 16000,
+        "n_background": 340000,
+        "r30": 272.21777421937554,
+        "r30_tpr": 0.2999375,
+        "r30_status": "ok",
+        "max_sic": 12.650452732093152,
+        "sic_format": "kitchensink",
+        "sic_max_err": 0.2
+    },
+    "device": "cuda:0"
+}

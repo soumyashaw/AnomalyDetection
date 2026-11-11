@@ -1,0 +1,60 @@
+{
+    "checkpoint_path": "aachen_head_expts/run_optim_weak_500_kitchensink_XtoWRto3W_aachen_seed73_20261030_210341/checkpoints/epoch=28_val_argos=0.4783.ckpt",
+    "evaluation_timestamp": "20261104_202408",
+    "metrics": {
+        "roc_auc": 0.8727962946691177,
+        "average_precision": 0.7316005541679574,
+        "accuracy": 0.9304494382022472,
+        "sensitivity": 0.7541875,
+        "specificity": 0.9387441176470588,
+        "threshold_used": 0.5,
+        "optimal_threshold": 0.5287909507751465,
+        "confusion_matrix": [
+            [
+                319173,
+                20827
+            ],
+            [
+                3933,
+                12067
+            ]
+        ],
+        "classification_report": {
+            "Background": {
+                "precision": 0.9878275240942601,
+                "recall": 0.9387441176470588,
+                "f1-score": 0.9626605701049304,
+                "support": 340000.0
+            },
+            "Signal": {
+                "precision": 0.36684501732838815,
+                "recall": 0.7541875,
+                "f1-score": 0.49359839653127174,
+                "support": 16000.0
+            },
+            "accuracy": 0.9304494382022472,
+            "macro avg": {
+                "precision": 0.6773362707113242,
+                "recall": 0.8464658088235294,
+                "f1-score": 0.7281294833181011,
+                "support": 356000.0
+            },
+            "weighted avg": {
+                "precision": 0.9599181979474795,
+                "recall": 0.9304494382022472,
+                "f1-score": 0.9415791241016201,
+                "support": 356000.0
+            }
+        },
+        "n_samples": 356000,
+        "n_signal": 16000,
+        "n_background": 340000,
+        "r30": 22666.666666666664,
+        "r30_tpr": 0.300875,
+        "r30_status": "ok",
+        "max_sic": 40.53147878175157,
+        "sic_format": "kitchensink",
+        "sic_max_err": 0.2
+    },
+    "device": "cuda:0"
+}

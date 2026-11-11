@@ -1,0 +1,60 @@
+{
+    "checkpoint_path": "aachen_head_expts/run_optim_weak_150_kitchensink_ZpToTpTp_aachen_seed109_20261107_154019/checkpoints/epoch=07_val_argos=0.0276.ckpt",
+    "evaluation_timestamp": "20261110_124649",
+    "metrics": {
+        "roc_auc": 0.9418789680392157,
+        "average_precision": 0.7843897262538353,
+        "accuracy": 0.9663718309859155,
+        "sensitivity": 0.20566666666666666,
+        "specificity": 0.9999323529411764,
+        "threshold_used": 0.5,
+        "optimal_threshold": 0.42392468452453613,
+        "confusion_matrix": [
+            [
+                339977,
+                23
+            ],
+            [
+                11915,
+                3085
+            ]
+        ],
+        "classification_report": {
+            "Background": {
+                "precision": 0.9661401793732168,
+                "recall": 0.9999323529411764,
+                "f1-score": 0.982745862070959,
+                "support": 340000.0
+            },
+            "Signal": {
+                "precision": 0.9925997425997426,
+                "recall": 0.20566666666666666,
+                "f1-score": 0.34073337751270155,
+                "support": 15000.0
+            },
+            "accuracy": 0.9663718309859155,
+            "macro avg": {
+                "precision": 0.9793699609864797,
+                "recall": 0.6027995098039216,
+                "f1-score": 0.6617396197918303,
+                "support": 355000.0
+            },
+            "weighted avg": {
+                "precision": 0.9672581890870138,
+                "recall": 0.9663718309859155,
+                "f1-score": 0.9556185739910326,
+                "support": 355000.0
+            }
+        },
+        "n_samples": 355000,
+        "n_signal": 15000,
+        "n_background": 340000,
+        "r30": 7906.976744186048,
+        "r30_tpr": 0.2995333333333333,
+        "r30_status": "ok",
+        "max_sic": 28.44255697405249,
+        "sic_format": "kitchensink",
+        "sic_max_err": 0.2
+    },
+    "device": "cuda:0"
+}

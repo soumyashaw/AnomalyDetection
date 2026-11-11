@@ -1,0 +1,60 @@
+{
+    "checkpoint_path": "aachen_head_expts/run_optim_weak_2k_kitchensink_ZpToTpTp_aachen_seed256_20261109_081007/checkpoints/epoch=22_val_argos=2.1717.ckpt",
+    "evaluation_timestamp": "20261110_143352",
+    "metrics": {
+        "roc_auc": 0.9366029267647059,
+        "average_precision": 0.9094484793732549,
+        "accuracy": 0.9821295774647887,
+        "sensitivity": 0.9047333333333333,
+        "specificity": 0.9855441176470588,
+        "threshold_used": 0.5,
+        "optimal_threshold": 0.5006893873214722,
+        "confusion_matrix": [
+            [
+                335085,
+                4915
+            ],
+            [
+                1429,
+                13571
+            ]
+        ],
+        "classification_report": {
+            "Background": {
+                "precision": 0.9957535199129902,
+                "recall": 0.9855441176470588,
+                "f1-score": 0.9906225148333959,
+                "support": 340000.0
+            },
+            "Signal": {
+                "precision": 0.7341231201990696,
+                "recall": 0.9047333333333333,
+                "f1-score": 0.8105476915725975,
+                "support": 15000.0
+            },
+            "accuracy": 0.9821295774647887,
+            "macro avg": {
+                "precision": 0.8649383200560299,
+                "recall": 0.9451387254901961,
+                "f1-score": 0.9005851032029968,
+                "support": 355000.0
+            },
+            "weighted avg": {
+                "precision": 0.9846987142912753,
+                "recall": 0.9821295774647887,
+                "f1-score": 0.9830137194843481,
+                "support": 355000.0
+            }
+        },
+        "n_samples": 355000,
+        "n_signal": 15000,
+        "n_background": 340000,
+        "r30": 340000.0,
+        "r30_tpr": 0.2995333333333333,
+        "r30_status": "ok",
+        "max_sic": 71.28089373714258,
+        "sic_format": "kitchensink",
+        "sic_max_err": 0.2
+    },
+    "device": "cuda:0"
+}

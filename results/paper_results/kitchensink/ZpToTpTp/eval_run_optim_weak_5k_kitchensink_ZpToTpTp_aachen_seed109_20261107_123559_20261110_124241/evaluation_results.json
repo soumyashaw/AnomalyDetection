@@ -1,0 +1,60 @@
+{
+    "checkpoint_path": "aachen_head_expts/run_optim_weak_5k_kitchensink_ZpToTpTp_aachen_seed109_20261107_123559/checkpoints/epoch=04_val_argos=5.8171.ckpt",
+    "evaluation_timestamp": "20261110_124241",
+    "metrics": {
+        "roc_auc": 0.9906487301960786,
+        "average_precision": 0.9765874756979221,
+        "accuracy": 0.9960535211267606,
+        "sensitivity": 0.9510666666666666,
+        "specificity": 0.9980382352941176,
+        "threshold_used": 0.5,
+        "optimal_threshold": 0.429599404335022,
+        "confusion_matrix": [
+            [
+                339333,
+                667
+            ],
+            [
+                734,
+                14266
+            ]
+        ],
+        "classification_report": {
+            "Background": {
+                "precision": 0.9978416018019979,
+                "recall": 0.9980382352941176,
+                "f1-score": 0.997939908861921,
+                "support": 340000.0
+            },
+            "Signal": {
+                "precision": 0.9553338244157236,
+                "recall": 0.9510666666666666,
+                "f1-score": 0.9531954698827381,
+                "support": 15000.0
+            },
+            "accuracy": 0.9960535211267606,
+            "macro avg": {
+                "precision": 0.9765877131088607,
+                "recall": 0.9745524509803921,
+                "f1-score": 0.9755676893723295,
+                "support": 355000.0
+            },
+            "weighted avg": {
+                "precision": 0.9960454985321552,
+                "recall": 0.9960535211267606,
+                "f1-score": 0.9960492987642091,
+                "support": 355000.0
+            }
+        },
+        "n_samples": 355000,
+        "n_signal": 15000,
+        "n_background": 340000,
+        "r30": "inf",
+        "r30_tpr": 0.2996666666666667,
+        "r30_status": "fpr_zero",
+        "max_sic": 85.03391323466187,
+        "sic_format": "kitchensink",
+        "sic_max_err": 0.2
+    },
+    "device": "cuda:0"
+}

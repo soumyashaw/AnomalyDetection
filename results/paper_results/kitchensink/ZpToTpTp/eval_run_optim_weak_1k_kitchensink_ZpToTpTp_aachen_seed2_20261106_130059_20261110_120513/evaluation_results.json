@@ -1,0 +1,60 @@
+{
+    "checkpoint_path": "aachen_head_expts/run_optim_weak_1k_kitchensink_ZpToTpTp_aachen_seed2_20261106_130059/checkpoints/epoch=21_val_argos=1.4325.ckpt",
+    "evaluation_timestamp": "20261110_120513",
+    "metrics": {
+        "roc_auc": 0.950322720490196,
+        "average_precision": 0.9286608168704648,
+        "accuracy": 0.9874478873239436,
+        "sensitivity": 0.9241333333333334,
+        "specificity": 0.9902411764705882,
+        "threshold_used": 0.5,
+        "optimal_threshold": 0.49389487504959106,
+        "confusion_matrix": [
+            [
+                336682,
+                3318
+            ],
+            [
+                1138,
+                13862
+            ]
+        ],
+        "classification_report": {
+            "Background": {
+                "precision": 0.9966313421348647,
+                "recall": 0.9902411764705882,
+                "f1-score": 0.993425983299401,
+                "support": 340000.0
+            },
+            "Signal": {
+                "precision": 0.8068684516880094,
+                "recall": 0.9241333333333334,
+                "f1-score": 0.8615288999378496,
+                "support": 15000.0
+            },
+            "accuracy": 0.9874478873239436,
+            "macro avg": {
+                "precision": 0.901749896911437,
+                "recall": 0.9571872549019608,
+                "f1-score": 0.9274774416186253,
+                "support": 355000.0
+            },
+            "weighted avg": {
+                "precision": 0.9886131918342933,
+                "recall": 0.9874478873239436,
+                "f1-score": 0.9878528671010256,
+                "support": 355000.0
+            }
+        },
+        "n_samples": 355000,
+        "n_signal": 15000,
+        "n_background": 340000,
+        "r30": 340000.0,
+        "r30_tpr": 0.29993333333333333,
+        "r30_status": "ok",
+        "max_sic": 74.65053598653478,
+        "sic_format": "kitchensink",
+        "sic_max_err": 0.2
+    },
+    "device": "cuda:0"
+}

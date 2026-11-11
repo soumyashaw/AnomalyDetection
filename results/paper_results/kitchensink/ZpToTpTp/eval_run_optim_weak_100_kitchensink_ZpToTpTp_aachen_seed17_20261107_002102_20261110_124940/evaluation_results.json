@@ -1,0 +1,60 @@
+{
+    "checkpoint_path": "aachen_head_expts/run_optim_weak_100_kitchensink_ZpToTpTp_aachen_seed17_20261107_002102/checkpoints/epoch=116_val_argos=0.0210.ckpt",
+    "evaluation_timestamp": "20261110_124940",
+    "metrics": {
+        "roc_auc": 0.5790892896078432,
+        "average_precision": 0.1463225408786952,
+        "accuracy": 0.7229633802816902,
+        "sensitivity": 0.5010666666666667,
+        "specificity": 0.7327529411764706,
+        "threshold_used": 0.5,
+        "optimal_threshold": 0.6208339929580688,
+        "confusion_matrix": [
+            [
+                249136,
+                90864
+            ],
+            [
+                7484,
+                7516
+            ]
+        ],
+        "classification_report": {
+            "Background": {
+                "precision": 0.9708362559426389,
+                "recall": 0.7327529411764706,
+                "f1-score": 0.8351580570547417,
+                "support": 340000.0
+            },
+            "Signal": {
+                "precision": 0.07639764179711324,
+                "recall": 0.5010666666666667,
+                "f1-score": 0.13258070206385605,
+                "support": 15000.0
+            },
+            "accuracy": 0.7229633802816902,
+            "macro avg": {
+                "precision": 0.5236169488698761,
+                "recall": 0.6169098039215686,
+                "f1-score": 0.4838693795592989,
+                "support": 355000.0
+            },
+            "weighted avg": {
+                "precision": 0.9330430750632505,
+                "recall": 0.7229633802816902,
+                "f1-score": 0.8054716899424508,
+                "support": 355000.0
+            }
+        },
+        "n_samples": 355000,
+        "n_signal": 15000,
+        "n_background": 340000,
+        "r30": 18.66695948171736,
+        "r30_tpr": 0.3,
+        "r30_status": "ok",
+        "max_sic": 1.3006333104326473,
+        "sic_format": "kitchensink",
+        "sic_max_err": 0.2
+    },
+    "device": "cuda:0"
+}

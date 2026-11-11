@@ -1,0 +1,60 @@
+{
+    "checkpoint_path": "aachen_head_expts/run_optim_weak_300_kitchensink_ZpToTpTp_aachen_seed256_20261109_081007/checkpoints/epoch=15_val_argos=0.2530.ckpt",
+    "evaluation_timestamp": "20261110_144050",
+    "metrics": {
+        "roc_auc": 0.9670432839215686,
+        "average_precision": 0.9031959945931305,
+        "accuracy": 0.9852647887323943,
+        "sensitivity": 0.8759333333333333,
+        "specificity": 0.9900882352941176,
+        "threshold_used": 0.5,
+        "optimal_threshold": 0.47956594824790955,
+        "confusion_matrix": [
+            [
+                336630,
+                3370
+            ],
+            [
+                1861,
+                13139
+            ]
+        ],
+        "classification_report": {
+            "Background": {
+                "precision": 0.9945020694789521,
+                "recall": 0.9900882352941176,
+                "f1-score": 0.9922902440857727,
+                "support": 340000.0
+            },
+            "Signal": {
+                "precision": 0.7958689199830395,
+                "recall": 0.8759333333333333,
+                "f1-score": 0.8339839410961948,
+                "support": 15000.0
+            },
+            "accuracy": 0.9852647887323943,
+            "macro avg": {
+                "precision": 0.8951854947309958,
+                "recall": 0.9330107843137254,
+                "f1-score": 0.9131370925909837,
+                "support": 355000.0
+            },
+            "weighted avg": {
+                "precision": 0.9861091195002516,
+                "recall": 0.9852647887323943,
+                "f1-score": 0.9856012453679033,
+                "support": 355000.0
+            }
+        },
+        "n_samples": 355000,
+        "n_signal": 15000,
+        "n_background": 340000,
+        "r30": 42500.0,
+        "r30_tpr": 0.2998,
+        "r30_status": "ok",
+        "max_sic": 49.54593886606307,
+        "sic_format": "kitchensink",
+        "sic_max_err": 0.2
+    },
+    "device": "cuda:0"
+}

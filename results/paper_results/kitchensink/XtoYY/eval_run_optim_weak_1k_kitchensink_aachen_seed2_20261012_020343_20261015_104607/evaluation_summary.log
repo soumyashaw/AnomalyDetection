@@ -1,0 +1,37 @@
+================================================================================
+ANOMALY DETECTION MODEL EVALUATION
+================================================================================
+
+Checkpoint: aachen_head_expts/run_optim_weak_1k_kitchensink_aachen_seed2_20261012_020343/checkpoints/epoch=26_val_argos=0.6670.ckpt
+Evaluation Time: 2026-10-15 10:47:50
+Device: cuda:0
+
+--------------------------------------------------------------------------------
+METRICS
+--------------------------------------------------------------------------------
+ROC AUC:              0.8852
+Average Precision:    0.7657
+Accuracy:             0.9537
+Sensitivity (TPR):    0.7522
+Specificity (TNR):    0.9656
+Threshold Used:       0.5000
+Optimal Threshold:    0.4976
+R30 (30% TPR):        15454.5455
+R30 Actual TPR:       0.30145
+R30 Status:           ok
+Max SIC:                  68.4229
+
+--------------------------------------------------------------------------------
+DATA STATISTICS
+--------------------------------------------------------------------------------
+Total Samples:        360000
+Signal Jets:          20000
+Background Jets:      340000
+
+--------------------------------------------------------------------------------
+CONFUSION MATRIX
+--------------------------------------------------------------------------------
+True Negatives:  328299
+False Positives: 11701
+False Negatives: 4955
+True Positives:  15045

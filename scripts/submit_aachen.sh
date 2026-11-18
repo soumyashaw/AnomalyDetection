@@ -22,4 +22,6 @@ fi
 
 : "${WANDB_API_KEY:?Add WANDB_API_KEY to .env or export it before submission}"
 mkdir -p batchSubmissions
-exec condor_submit scripts/train_aachen.sub
+exec condor_submit scripts/train_kitchensink.sub
+# For Aachen jobs
+# exec condor_submit scripts/train_aachen.sub

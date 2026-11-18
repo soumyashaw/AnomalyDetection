@@ -1,4 +1,2 @@
 config_name,dataset_path,seed,jet_name,merge_strategy,batch_size,max_epochs,learning_rate,train_val_split,n_signal,n_supp_background,n_background,embedding_dim,log_dir,pretrained_ckpt,load_pretrained,freeze_backbone,use_class_weights,wandb_project,use_wandb,use_hpc
-weak_100_350k_scratch_aachen_seed2,/.automount/net_rw/net__data_ttk/soshaw,2,both,concat,64,300,1e-4,0.7,100,100000,350000,128,aachen_head_expts,None,false,false,true,anomaly-detection-lhco,true,true
-weak_100_350k_scratch_aachen_seed17,/.automount/net_rw/net__data_ttk/soshaw,17,both,concat,64,300,1e-4,0.7,100,100000,350000,128,aachen_head_expts,None,false,false,true,anomaly-detection-lhco,true,true
-weak_100_350k_scratch_aachen_seed73,/.automount/net_rw/net__data_ttk/soshaw,73,both,concat,64,300,1e-4,0.7,100,100000,350000,128,aachen_head_expts,None,false,false,true,anomaly-detection-lhco,true,true
+optim_weak_100_kitchensink_ZpToTpTp_aachen_seed256,/.automount/net_rw/net__data_ttk/soshaw/KitchenSink,256,both,concat,1024,150,2e-4,0.7,50,119950,270000,128,aachen_head_expts,backbone_weights/pretrained_class_1M_each/backbone.ckpt,true,true,true,anomaly-detection-lhco,false,true

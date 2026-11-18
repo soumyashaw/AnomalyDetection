@@ -255,9 +255,10 @@ def create_loader_from_cached_data(cached_data, batch_size, model_type="single")
 class ModelEvaluator:
     """Comprehensive model evaluation with metrics and visualizations."""
     
-    def __init__(self, checkpoint_path, gpu_id, model_type="single", output_dir="evaluation_results"):
+    def __init__(self, checkpoint_path, gpu_id, model_type="single", output_dir="evaluation_results",
+                 sic_format="legacy", sic_max_err=0.2):
         """Initialize evaluator.
-        
+
         Parameters
         ----------
         checkpoint_path : str
@@ -268,9 +269,19 @@ class ModelEvaluator:
             Model architecture type: 'single', 'dijet', or 'aachen'
         output_dir : str
             Directory to save evaluation results
+        sic_format : str
+            'legacy': max SIC over all points with FPR > 0.
+            'kitchensink': as in the KitchenSink paper, max SIC only over points whose
+            background efficiency has a relative statistical error below sic_max_err.
+        sic_max_err : float
+            Maximum relative error on the background efficiency (kitchensink format only)
         """
+        if sic_format not in ("legacy", "kitchensink"):
+            raise ValueError(f"Unknown sic_format: {sic_format}. Choose from 'legacy' or 'kitchensink'")
         self.checkpoint_path = checkpoint_path
         self.model_type = model_type.lower()
+        self.sic_format = sic_format
+        self.sic_max_err = sic_max_err
         self.output_dir = Path(output_dir)
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
@@ -627,7 +638,21 @@ class ModelEvaluator:
             True Positive Rate values
         sic : np.ndarray
             SIC values (TPR / sqrt(FPR))
+        reliable : np.ndarray
+            Boolean mask of the points that enter the max SIC
         """
+        if self.sic_format == "kitchensink":
+            # As in the KitchenSink paper (scripts/BDT_utils.py and scripts/plot_utils.py, commit 6ed1f07)
+            fpr, tpr, _ = roc_curve(y_true, y_scores, drop_intermediate=True)
+            valid_idx = fpr > 0
+            tpr, fpr = tpr[valid_idx], fpr[valid_idx]
+            sic = tpr / np.sqrt(fpr)
+            # Only trust points whose background efficiency has a relative error below sic_max_err,
+            # i.e. at least 1 / sic_max_err**2 background events pass the cut
+            n_background = np.sum(y_true == 0)
+            reliable = fpr > 1.0 / (n_background * self.sic_max_err**2)
+            return tpr, sic, reliable
+
         # Sort by scores in descending order
         sort_idx = np.argsort(-y_scores)
         y_true_sorted = y_true[sort_idx]
@@ -654,8 +679,8 @@ class ModelEvaluator:
         # Add point at origin
         tpr = np.concatenate([[0], tpr_valid])
         sic = np.concatenate([[0], sic_valid])
-        
-        return tpr, sic
+
+        return tpr, sic, np.ones_like(sic, dtype=bool)
     
     def plot_sic_curve(self, y_true, y_scores, signal_ratio=1.0):
         """Plot SIC curve for the given signal ratio.
@@ -677,13 +702,16 @@ class ModelEvaluator:
         fig, ax = plt.subplots(figsize=(8, 6))
         
         # Calculate SIC curve
-        tpr, sic = self.calculate_sic(y_true, y_scores, signal_ratio=signal_ratio)
-        
-        # Calculate max SIC
-        max_sic = float(np.max(sic)) if len(sic) > 0 else 0.0
-        
+        tpr, sic, reliable = self.calculate_sic(y_true, y_scores, signal_ratio=signal_ratio)
+
+        # Calculate max SIC over the points that pass the statistical cut
+        max_sic = float(np.max(sic[reliable])) if reliable.any() else 0.0
+
         # Plot SIC curve
-        ax.plot(tpr, sic, linewidth=2.5, label='Model', color='#1f77b4')
+        ax.plot(tpr[reliable], sic[reliable], linewidth=2.5, label='Model', color='#1f77b4')
+        if not reliable.all():
+            ax.plot(tpr[~reliable], sic[~reliable], linewidth=1.5, linestyle=':', color='#1f77b4', alpha=0.5,
+                    label=f'excluded from max SIC (bkg. rel. error > {self.sic_max_err:.0%})')
         
         # Plot random classifier baseline (SIC = sqrt(TPR))
         tpr_random = np.linspace(0, 1, 1000)
@@ -766,7 +794,7 @@ class ModelEvaluator:
                 f.write(f"R30 Status:           {metrics.get('r30_status', 'N/A')}\n")
             # Add max SIC value if available
             if "max_sic" in metrics:
-                f.write(f"Max SIC:                  {metrics['max_sic']:.4f}\n")
+                f.write(f"Max SIC:                  {metrics['max_sic']:.4f} ({self._sic_format_label()})\n")
             f.write("\n")
             f.write("-" * 80 + "\n")
             f.write("DATA STATISTICS\n")
@@ -843,11 +871,14 @@ class ModelEvaluator:
         print("\n" + "-" * 80)
         print("MAX SIC VALUE")
         print("-" * 80)
-        print(f"Max SIC:                  {max_sic:.4f}")
+        print(f"Max SIC:                  {max_sic:.4f} ({self._sic_format_label()})")
         print("-" * 80 + "\n")
-        
+
         # Add max SIC value to metrics dictionary
         metrics["max_sic"] = float(max_sic)
+        metrics["sic_format"] = self.sic_format
+        if self.sic_format == "kitchensink":
+            metrics["sic_max_err"] = self.sic_max_err
         
         # Save results
         print("\nSaving results...")
@@ -857,9 +888,16 @@ class ModelEvaluator:
         print("EVALUATION COMPLETE")
         print(f"Results saved to: {self.eval_dir}")
         print("=" * 80 + "\n")
-        print(f"{metrics['roc_auc']:.4f} & {metrics['r30']:.2f} & {max_sic:.4f} ")
-        
+        r30_str = metrics['r30'] if isinstance(metrics['r30'], str) else f"{metrics['r30']:.2f}"
+        print(f"{metrics['roc_auc']:.4f} & {r30_str} & {max_sic:.4f} ")
+
         return metrics
+
+    def _sic_format_label(self):
+        """Short description of the SIC format for logs."""
+        if self.sic_format == "kitchensink":
+            return f"kitchensink format, bkg. rel. error <= {self.sic_max_err:.0%}"
+        return "legacy format, all points with FPR > 0"
 
 
 def main():
@@ -884,6 +922,13 @@ def main():
                        help="GPU ID to use for evaluation")
     parser.add_argument("--clear_cache", action="store_true",
                        help="Clear cached data and reload from HDF5 files")
+    parser.add_argument("--sic_format", type=str, default="legacy", choices=["legacy", "kitchensink"],
+                       help="Max SIC definition: 'legacy' uses all points with FPR > 0; 'kitchensink' follows the "
+                            "KitchenSink paper (roc_curve thresholds, max only where the background efficiency "
+                            "has a relative error below --sic_max_err) (default: legacy)")
+    parser.add_argument("--sic_max_err", type=float, default=0.2,
+                       help="Maximum relative error on the background efficiency for --sic_format kitchensink "
+                            "(KitchenSink paper: 0.2, i.e. at least 25 background events) (default: 0.2)")
     args = parser.parse_args()
     
     # Clear cache if requested
@@ -906,7 +951,7 @@ def main():
     # Load test data
     # NOTE: Order must match training! Signal first, then background
     # Converted copy in the background schema (see src/data/convert_kitchensink_signal.py)
-    signal_path = os.path.join(args.dataset_path, "sn_XtoYY_20k_SR_test_epxpypz.h5")
+    signal_path = os.path.join(args.dataset_path, "sn_ZpToTpTp_15k_SR_test_epxpypz.h5")
     background_path = os.path.join(args.dataset_path, "bg_340k_SR_test.h5")
     h5_files_test = [signal_path, background_path]
     
@@ -970,7 +1015,9 @@ def main():
         checkpoint_path=args.checkpoint,
         gpu_id=args.gpu_id,
         model_type=args.model_type,
-        output_dir=args.output_dir
+        output_dir=args.output_dir,
+        sic_format=args.sic_format,
+        sic_max_err=args.sic_max_err,
     )
     metrics = evaluator.evaluate(test_loader, threshold=args.threshold)
 

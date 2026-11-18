@@ -714,7 +714,7 @@ def main():
     }
 
     # Converted copy in the background schema (see src/data/convert_kitchensink_signal.py)
-    signal_path = os.path.join(args.dataset_path, "sn_XtoYY_10k_SR_train_epxpypz.h5")
+    signal_path = os.path.join(args.dataset_path, "sn_ZpToTpTp_10k_SR_train_epxpypz.h5")
     supp_background_path = os.path.join(args.dataset_path, "bg_120k_SR_supp.h5")
     # background_path = os.path.join(args.dataset_path, "bg_200k_SR_train.h5")
     background_path = os.path.join(args.dataset_path, "bg_270k_SR_train.h5")

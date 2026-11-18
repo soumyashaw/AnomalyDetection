@@ -30,9 +30,12 @@ OUTPUT SCHEMA (identical to KitchenSink/bg_*.h5):
 └── source_event_index   (N,)        int64
 
 JET AXIS:
-The background's jet_coords is the full jet before truncation to 100 constituents. The signal file
-only contains the stored constituents, so the jet axis here is their 4-momentum sum. This is exact
-for untruncated jets (~96% of signal jets) and approximate for jets that hit the 100-constituent cap.
+The background's jet_coords is the full jet before truncation to 100 constituents. If the input file
+has a jet_coords dataset with the full jets (pt, eta, phi, m), as written by
+prepare_kitchensink_signal.py, it is used as the jet axis, matching the background exactly.
+Otherwise (e.g. sn_XtoYY_*_SR_*.h5) the jet axis is the 4-momentum sum of the stored constituents.
+This is exact for untruncated jets (~96% of XtoYY' jets) and approximate for jets that hit the
+100-constituent cap.
 
 USAGE: python -m src.data.convert_kitchensink_signal [--input_files a.h5 b.h5] [--suffix _epxpypz]
 Writes <input stem><suffix>.h5 next to each input file. Input files are not modified.
@@ -53,12 +56,14 @@ def wrap_phi(dphi):
     return (dphi + np.pi) % (2 * np.pi) - np.pi
 
 
-def constituents_to_lhco_schema(pt, eta, phi, mass, mask):
+def constituents_to_lhco_schema(pt, eta, phi, mass, mask, jet_ptetaphim=None):
     """Build background-style per-jet arrays from (pt, eta, phi, mass) constituents.
 
     Args:
         pt, eta, phi, mass: (N, n_particles) arrays, padding entries are ignored
         mask: (N, n_particles) boolean array, True for real constituents
+        jet_ptetaphim: optional (N, 4) full-jet (pt, eta, phi, m) used as the jet axis;
+            if None, the jet is the 4-momentum sum of the stored constituents
 
     Returns:
         dict with "4mom" (N, P, 4), "coords" (N, P, 2), "features" (N, P, 9) as float64
@@ -70,12 +75,17 @@ def constituents_to_lhco_schema(pt, eta, phi, mass, mask):
     energy = np.sqrt(px**2 + py**2 + pz**2 + mass**2)
     px, py, pz, energy = (np.where(mask, a, 0.0) for a in (px, py, pz, energy))
 
-    # Jet 4-vector = sum of stored constituents
-    jet_e, jet_px, jet_py, jet_pz = (a.sum(axis=1) for a in (energy, px, py, pz))
-    jet_pt = np.hypot(jet_px, jet_py)
-    jet_eta = np.arcsinh(jet_pz / jet_pt)
-    jet_phi = np.arctan2(jet_py, jet_px)
-    jet_m = np.sqrt(np.maximum(jet_e**2 - jet_px**2 - jet_py**2 - jet_pz**2, 0.0))
+    if jet_ptetaphim is None:
+        # Jet 4-vector = sum of stored constituents
+        jet_e, jet_px, jet_py, jet_pz = (a.sum(axis=1) for a in (energy, px, py, pz))
+        jet_pt = np.hypot(jet_px, jet_py)
+        jet_eta = np.arcsinh(jet_pz / jet_pt)
+        jet_phi = np.arctan2(jet_py, jet_px)
+        jet_m = np.sqrt(np.maximum(jet_e**2 - jet_px**2 - jet_py**2 - jet_pz**2, 0.0))
+    else:
+        # Full jet before constituent truncation, as the background's jet_coords
+        jet_pt, jet_eta, jet_phi, jet_m = (jet_ptetaphim[:, i] for i in range(4))
+        jet_e = np.sqrt((jet_pt * np.cosh(jet_eta)) ** 2 + jet_m**2)
 
     eta_rel = eta - jet_eta[:, None]
     phi_rel = wrap_phi(phi - jet_phi[:, None])
@@ -127,9 +137,10 @@ def convert_kitchensink_signal(input_file, output_file, overwrite=False):
             )
 
         n_events = f_in["signal"].shape[0]
+        full_jets = f_in["jet_coords"][:].astype(np.float64) if "jet_coords" in f_in else None
         jets = {}
         masks = {}
-        for jet_name in ["jet1", "jet2"]:
+        for i_jet, jet_name in enumerate(["jet1", "jet2"]):
             mom4 = f_in[f"{jet_name}/4mom"][:].astype(np.float64)
             masks[jet_name] = f_in[f"{jet_name}/mask"][:]
             jets[jet_name] = constituents_to_lhco_schema(
@@ -138,6 +149,7 @@ def convert_kitchensink_signal(input_file, output_file, overwrite=False):
                 phi=mom4[..., 2],
                 mass=mom4[..., 3],
                 mask=masks[jet_name][..., 0].astype(bool),
+                jet_ptetaphim=None if full_jets is None else full_jets[:, i_jet],
             )
 
         # tau1-3 are not stored in the signal file; mjj is the full-jet value from the source
@@ -156,6 +168,7 @@ def convert_kitchensink_signal(input_file, output_file, overwrite=False):
             datasets[f"{jet_name}/mask"] = masks[jet_name].astype(np.int8)
 
         attrs = dict(f_in.attrs)
+        attrs.pop("jet_coords", None)  # describes the input's jet_coords layout, replaced below
 
     attrs.update(
         {
@@ -163,7 +176,11 @@ def convert_kitchensink_signal(input_file, output_file, overwrite=False):
             "mom4_format": "epxpypz",
             "particle_feature_order": PARTICLE_FEATURE_ORDER,
             "pt_energy_features": "raw",
-            "jet_axis": "sum of stored constituents (full-jet 4-vector not available in source file)",
+            "jet_axis": (
+                "sum of stored constituents (full-jet 4-vector not available in source file)"
+                if full_jets is None
+                else "full jet before constituent truncation (from source jet_coords)"
+            ),
             "jet_coords_phi_range": "[0, 2pi)",
             "jet_features_note": "tau1-3 not available in source file, stored as NaN; mjj copied from source 'mjj'",
             "converted_from": str(input_file),
